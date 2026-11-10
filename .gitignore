@@ -1,0 +1,33 @@
+# Локальные настройки и секреты
+.env
+.env.*
+!.env.example
+
+# Виртуальные окружения
+/.venv/
+/venv/
+
+# Кеши Python и тестов
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Локальные данные и результаты сборки базы
+/data/raw/*
+!/data/raw/.gitkeep
+/data/processed/*
+!/data/processed/.gitkeep
+/data/evaluation/organizer/*
+!/data/evaluation/organizer/.gitkeep
+
+# Результаты автоматической оценки и упаковки
+/submission.csv
+/dist/
+
+# Системные файлы
+Thumbs.db
+.DS_Store

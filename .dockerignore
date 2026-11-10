@@ -1,0 +1,28 @@
+# Git и локальные окружения
+.git
+.venv
+venv
+
+# Локальные настройки
+**/.env
+**/.env.*
+
+# Кеши Python и тестов
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+.coverage
+.coverage.*
+htmlcov
+
+# Данные подключаются при запуске контейнера
+data
+
+# Результаты автоматической оценки и упаковки
+submission.csv
+dist
+
+# Системные файлы
+**/Thumbs.db
+**/.DS_Store
