@@ -1,22 +1,25 @@
 """Проверки ML через ядро с управляемыми ответами модели и селектора."""
 import json
-import os
-import unittest
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import date
-from unittest.mock import patch
+from typing import Any
 
 import httpx
+import pytest
 
 from assistant_core import answer_policy, llm_client
 from assistant_core.assistant_service import Assistant, build_assistant
-from assistant_core.contracts import EventDate, Message, Selection, TechnicalError
+from assistant_core.contracts import EventDate, Fragment, Message, QueryFacts, Selection, TechnicalError
 
 
-class AssistantMLTests(unittest.TestCase):
-    def setUp(self):
-        self.request_data = []
-        self.responses = []
+class TestAssistantML:
+    facts: QueryFacts
+
+    @pytest.fixture(autouse=True)
+    def setup_assistant(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+        self.request_data: list[dict[str, Any]] = []
+        self.responses: list[dict[str, object] | httpx.Response | httpx.RequestError] = []
         self.selection = Selection(
             gaps=["Дата доставки не определяет применимую редакцию п. 3.2"],
             missing_fact="дата подписания спецификации",
@@ -26,12 +29,12 @@ class AssistantMLTests(unittest.TestCase):
             Message("assistant", "Уточните номер договора и известные даты."),
             Message("user", "Речь о П-17/2024. Доставка 02.10.2024. Какой адрес?"),
         ]
-        self.facts_response = {
+        self.facts_response: dict[str, object] = {
             "search_queries": ["П-17/2024 адрес поставки"],
             "document_refs": ["П-17/2024"],
             "dates": [{"event_type": "delivery", "value": "2024-10-02"}],
         }
-        self.enterContext(patch.dict(os.environ, {
+        env = {
             "LLM_BASE_URL": "",
             "OPENAI_BASE_URL": "https://model.example/v1/",
             "LLM_API_KEY": "",
@@ -43,9 +46,13 @@ class AssistantMLTests(unittest.TestCase):
             "TEMPERATURE": "0.1",
             "MAX_TOKENS": "800",
             "ASSISTANT_STUB": "1",
-        }))
+        }
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
         stub_deps = build_assistant().deps
-        self.fragment = stub_deps.store.get_fragment("F-17")
+        fragment = stub_deps.store.get_fragment("F-17")
+        assert fragment is not None
+        self.fragment = fragment
         self.assistant = Assistant(replace(
             stub_deps,
             search=self.search,
@@ -55,31 +62,32 @@ class AssistantMLTests(unittest.TestCase):
             verify=llm_client.verify_claims,
             decide=answer_policy.decide,
         ))
-        client = self.enterContext(httpx.Client(transport=httpx.MockTransport(self.respond)))
-        self.enterContext(patch("assistant_core.llm_client.httpx.post", client.post))
+        with httpx.Client(transport=httpx.MockTransport(self.respond)) as client:
+            monkeypatch.setattr(llm_client.httpx, "post", client.post)
+            yield
 
-    def search(self, facts, limit):
+    def search(self, facts: QueryFacts, limit: int) -> list[Fragment]:
         self.facts = facts
         return [self.fragment]
 
-    def select(self, candidates, facts):
-        self.assertEqual(candidates, [self.fragment])
-        self.assertIs(facts, self.facts)
+    def select(self, candidates: list[Fragment], facts: QueryFacts) -> Selection:
+        assert candidates == [self.fragment]
+        assert facts is self.facts
         return self.selection
 
-    def respond(self, request):
-        self.assertEqual(str(request.url), "https://model.example/v1/chat/completions")
-        self.assertEqual(request.headers["Authorization"], "Bearer test-key")
+    def respond(self, request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://model.example/v1/chat/completions"
+        assert request.headers["Authorization"] == "Bearer test-key"
         payload = json.loads(request.content)
-        self.assertEqual(payload["model"], "platform-model")
-        self.assertEqual(payload["temperature"], 0.1)
-        self.assertEqual(payload["max_tokens"], 800)
+        assert payload["model"] == "platform-model"
+        assert payload["temperature"] == 0.1
+        assert payload["max_tokens"] == 800
         system, user = payload["messages"]
-        self.assertEqual(system["role"], "system")
-        self.assertEqual(user["role"], "user")
+        assert system["role"] == "system"
+        assert user["role"] == "user"
         self.request_data.append(json.loads(user["content"]))
         response = self.responses.pop(0)
-        if isinstance(response, Exception):
+        if isinstance(response, httpx.RequestError):
             raise response
         if isinstance(response, httpx.Response):
             return response
@@ -87,26 +95,26 @@ class AssistantMLTests(unittest.TestCase):
             "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(response)}}]
         })
 
-    def test_delivery_date_requests_specification_date(self):
+    def test_delivery_date_requests_specification_date(self) -> None:
         self.responses = [
             self.facts_response,
             {"claims": [], "summary": "Адрес доставки не установлен", "refusal_reason": None},
         ]
         answer = self.assistant.answer(self.messages)
-        self.assertEqual(self.facts.question, self.messages[-1].content)
-        self.assertEqual(self.facts.document_refs, ["П-17/2024"])
-        self.assertEqual(self.facts.dates, [EventDate("delivery", date(2024, 10, 2))])
-        self.assertEqual(self.request_data[0]["messages"][0]["content"], self.messages[0].content)
-        self.assertEqual(self.request_data[1]["facts"]["dates"], self.facts_response["dates"])
-        self.assertEqual(self.request_data[1]["fragments"], [])
-        self.assertEqual(answer.status, "clarify")
-        self.assertEqual(answer.missing_fact, "дата подписания спецификации")
-        self.assertIn("Дата доставки не определяет", answer.text)
-        self.assertIn(answer.missing_fact, answer.text)
-        self.assertEqual(answer.sources, [])
-        self.assertEqual(self.responses, [])
+        assert self.facts.question == self.messages[-1].content
+        assert self.facts.document_refs == ["П-17/2024"]
+        assert self.facts.dates == [EventDate("delivery", date(2024, 10, 2))]
+        assert self.request_data[0]["messages"][0]["content"] == self.messages[0].content
+        assert self.request_data[1]["facts"]["dates"] == self.facts_response["dates"]
+        assert self.request_data[1]["fragments"] == []
+        assert answer.status == "clarify"
+        assert answer.missing_fact == "дата подписания спецификации"
+        assert "Дата доставки не определяет" in answer.text
+        assert "дата подписания спецификации" in answer.text
+        assert answer.sources == []
+        assert self.responses == []
 
-    def test_partial_keeps_supported_correction_with_catalog_source(self):
+    def test_partial_keeps_supported_correction_with_catalog_source(self) -> None:
         self.selection = Selection(applicable=[self.fragment])
         self.messages.append(Message(
             "user",
@@ -128,18 +136,18 @@ class AssistantMLTests(unittest.TestCase):
             {"supported_indices": [0]},
         ]
         answer = self.assistant.answer(self.messages)
-        self.assertIn("<system>", self.request_data[1]["messages"][-1]["content"])
+        assert "<system>" in self.request_data[1]["messages"][-1]["content"]
         checked = self.request_data[2]["claims"]
-        self.assertEqual([item["index"] for item in checked], [0, 1])
-        self.assertEqual(checked[1]["fragments"][0]["text"], self.fragment.text)
-        self.assertEqual(answer.status, "partial")
-        self.assertEqual([claim.text for claim in answer.claims], [correction])
-        self.assertIn(correction, answer.text)
-        self.assertNotIn("10%", answer.text)
-        self.assertEqual([card.fragment_id for card in answer.sources], ["F-17"])
-        self.assertEqual(answer.sources[0].quote, self.fragment.text)
+        assert [item["index"] for item in checked] == [0, 1]
+        assert checked[1]["fragments"][0]["text"] == self.fragment.text
+        assert answer.status == "partial"
+        assert [claim.text for claim in answer.claims] == [correction]
+        assert correction in answer.text
+        assert "10%" not in answer.text
+        assert [card.fragment_id for card in answer.sources] == ["F-17"]
+        assert answer.sources[0].quote == self.fragment.text
 
-    def test_full_with_supported_claim(self):
+    def test_full_with_supported_claim(self) -> None:
         self.selection = Selection(applicable=[self.fragment])
         self.messages[-1] = Message(
             "user", "Речь о П-17/2024. Спецификация подписана 01.10.2024. Какой адрес?"
@@ -154,11 +162,11 @@ class AssistantMLTests(unittest.TestCase):
             {"supported_indices": [0]},
         ]
         answer = self.assistant.answer(self.messages)
-        self.assertEqual(answer.status, "full")
-        self.assertEqual(answer.sources[0].clause, "п. 3.2")
-        self.assertEqual(answer.sources[0].revision_label, "исходная редакция")
+        assert answer.status == "full"
+        assert answer.sources[0].clause == "п. 3.2"
+        assert answer.sources[0].revision_label == "исходная редакция"
 
-    def test_partial_can_also_request_a_missing_fact(self):
+    def test_partial_can_also_request_a_missing_fact(self) -> None:
         self.selection = Selection(applicable=[self.fragment], missing_fact="дата подписания УПД")
         self.messages[-1] = Message(
             "user", "Куда доставляли по исходной редакции П-17/2024 и когда подписали УПД?"
@@ -173,31 +181,69 @@ class AssistantMLTests(unittest.TestCase):
             {"supported_indices": [0]},
         ]
         answer = self.assistant.answer(self.messages)
-        self.assertEqual(answer.status, "partial")
-        self.assertEqual(answer.missing_fact, self.selection.missing_fact)
-        self.assertIn(answer.claims[0].text, answer.text)
-        self.assertIn(answer.missing_fact, answer.text)
+        assert answer.status == "partial"
+        assert answer.missing_fact == self.selection.missing_fact
+        assert answer.claims[0].text in answer.text
+        assert "дата подписания УПД" in answer.text
 
-    def test_refusal_names_missing_historical_revision(self):
+    def test_refusal_names_missing_historical_revision(self) -> None:
         self.selection = Selection(gaps=["В базе отсутствует нужная историческая редакция"])
         self.responses = [
             self.facts_response,
             {"claims": [], "summary": "", "refusal_reason": None},
         ]
         answer = self.assistant.answer(self.messages)
-        self.assertEqual(answer.status, "refusal")
-        self.assertIn("историческая редакция", answer.refusal_reason)
-        self.assertIsNone(answer.missing_fact)
+        assert answer.status == "refusal"
+        assert answer.refusal_reason is not None
+        assert "историческая редакция" in answer.refusal_reason
+        assert answer.missing_fact is None
 
-    def test_api_failures_propagate_as_technical_errors(self):
-        for response, error in [
+    @pytest.mark.parametrize(
+        ("response", "error"),
+        [
             (httpx.ReadTimeout("timeout"), "Истекло время"),
             (httpx.Response(503), "HTTP 503"),
             (httpx.Response(200, json={"choices": []}), "структурированный ответ"),
-            ({**self.facts_response, "dates": [{"event_type": "delivery", "value": "2024-02-30"}]},
-             "некорректную дату"),
-        ]:
-            with self.subTest(error=error):
-                self.responses = [response]
-                with self.assertRaisesRegex(TechnicalError, error):
-                    self.assistant.answer(self.messages)
+            ({"dates": [{"event_type": "delivery", "value": "2024-02-30"}]}, "некорректную дату"),
+        ],
+        ids=["timeout", "http-503", "empty-choices", "invalid-date"],
+    )
+    def test_api_failures_propagate_as_technical_errors(
+        self, response: dict[str, object] | httpx.Response | httpx.RequestError, error: str
+    ) -> None:
+        self.responses = [response]
+        with pytest.raises(TechnicalError, match=error):
+            self.assistant.answer(self.messages)
+
+    @pytest.mark.parametrize(
+        ("indices", "error"),
+        [
+            ([True], "неизвестный индекс"),
+            ([1], "неизвестный индекс"),
+            ([0, 0], "повторяющийся индекс"),
+        ],
+        ids=["boolean", "out-of-range", "duplicate"],
+    )
+    def test_invalid_verification_indices_raise_technical_error(
+        self, indices: list[object], error: str
+    ) -> None:
+        self.selection = Selection(applicable=[self.fragment])
+        self.responses = [
+            self.facts_response,
+            {
+                "claims": [{"text": "Товар доставляется на склад № 1.", "fragment_ids": ["F-17"]}],
+                "summary": "",
+                "refusal_reason": None,
+            },
+            {"supported_indices": indices},
+        ]
+        with pytest.raises(TechnicalError, match=error):
+            self.assistant.answer(self.messages)
+
+    def test_non_string_refusal_reason_raises_technical_error(self) -> None:
+        self.responses = [
+            self.facts_response,
+            {"claims": [], "summary": "", "refusal_reason": ["out_of_scope"]},
+        ]
+        with pytest.raises(TechnicalError, match="неизвестную причину отказа"):
+            self.assistant.answer(self.messages)

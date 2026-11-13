@@ -22,7 +22,7 @@ def _env(*names: str) -> str:
     return ""
 
 
-def _request(prompt: str, data: dict) -> dict:
+def _request(prompt: str, data: dict[str, object]) -> dict[str, object]:
     base_url = _env("LLM_BASE_URL", "OPENAI_BASE_URL", "BASE_URL").rstrip("/")
     api_key = _env("LLM_API_KEY", "OPENAI_API_KEY")
     model = _env("LLM_MODEL", "OPENAI_MODEL", "GEN_MODEL")
@@ -80,7 +80,7 @@ def _request(prompt: str, data: dict) -> dict:
     return result
 
 
-def _array(data: dict, field: str) -> list:
+def _array(data: dict[str, object], field: str) -> list[object]:
     value = data.get(field)
     if not isinstance(value, list):
         raise TechnicalError(f"В ответе модели ожидается массив {field}")
@@ -93,14 +93,14 @@ def _string(value: object, field: str, *, allow_empty: bool = False) -> str:
     return value.strip()
 
 
-def _strings(data: dict, field: str) -> list[str]:
+def _strings(data: dict[str, object], field: str) -> list[str]:
     return list(dict.fromkeys(_string(item, field) for item in _array(data, field)))
 
 
 def extract_facts(messages: list[Message]) -> QueryFacts:
     question = messages[-1].content
     result = _request(llm_prompts.EXTRACT_FACTS, {"messages": [asdict(m) for m in messages]})
-    dates = []
+    dates: list[EventDate] = []
     for item in _array(result, "dates"):
         if not isinstance(item, dict):
             raise TechnicalError("В ответе модели ожидается объект даты события")
@@ -151,7 +151,7 @@ def draft_answer(
             "fragments": [_fragment_data(fragment) for fragment in fragments],
         },
     )
-    claims = []
+    claims: list[Claim] = []
     for item in _array(result, "claims"):
         if not isinstance(item, dict):
             raise TechnicalError("В ответе модели ожидается объект вывода")
@@ -160,7 +160,9 @@ def draft_answer(
             raise TechnicalError("Модель вернула вывод без ссылок на фрагменты")
         claims.append(Claim(_string(item.get("text"), "text"), fragment_ids))
     reason = result.get("refusal_reason")
-    if "refusal_reason" not in result or reason not in (None, "out_of_scope"):
+    if "refusal_reason" not in result or (
+        reason is not None and (not isinstance(reason, str) or reason != "out_of_scope")
+    ):
         raise TechnicalError("Модель вернула неизвестную причину отказа")
     return Draft(claims, _string(result.get("summary"), "summary", allow_empty=True), reason)
 
@@ -182,9 +184,11 @@ def verify_claims(claims: list[Claim], fragments: dict[str, Fragment]) -> list[C
         },
     )
     indices = _array(result, "supported_indices")
-    if any(type(index) is not int or not 0 <= index < len(claims) for index in indices):
-        raise TechnicalError("Модель вернула неизвестный индекс вывода")
-    supported = set(indices)
+    supported: set[int] = set()
+    for index in indices:
+        if type(index) is not int or not 0 <= index < len(claims):
+            raise TechnicalError("Модель вернула неизвестный индекс вывода")
+        supported.add(index)
     if len(supported) != len(indices):
         raise TechnicalError("Модель вернула повторяющийся индекс вывода")
     return [claim for index, claim in enumerate(claims) if index in supported]
