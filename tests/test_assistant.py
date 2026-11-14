@@ -1,8 +1,10 @@
 """Проверки ML через ядро с управляемыми ответами модели и селектора."""
 import json
+import os
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -247,3 +249,77 @@ class TestAssistantML:
         ]
         with pytest.raises(TechnicalError, match="неизвестную причину отказа"):
             self.assistant.answer(self.messages)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("KNOWLEDGE_DB"),
+    reason="Для проверки стыка укажите KNOWLEDGE_DB с каталогом организаторов.",
+)
+def test_p17_clarifies_then_uses_applicable_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    database = Path(os.environ["KNOWLEDGE_DB"])
+    monkeypatch.setenv("ASSISTANT_STUB", "0")
+    monkeypatch.setenv("LLM_BASE_URL", "https://model.example/v1/")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_MODEL", "platform-model")
+    monkeypatch.setenv("TEMPERATURE", "0")
+    monkeypatch.setenv("MAX_TOKENS", "800")
+    monkeypatch.setenv("LLM_TIMEOUT", "5")
+    assistant = build_assistant(str(database))
+    question = Message("user", "П-17/2024. Доставка 02.10.2024. Какой адрес?")
+    base_facts: dict[str, object] = {
+        "search_queries": ["П-17/2024 адрес доставки"],
+        "document_refs": ["П-17/2024"],
+    }
+    fragment_id = "frag-9b9b9eb7d974ce5403da4a9a"
+    expected_claim = "Товар доставляется по адресу: Московская область, г. Химки, ул. Заводская, д. 15, склад № 3."
+    responses = iter([
+        {**base_facts, "dates": [{"event_type": "delivery", "value": "2024-10-02"}]},
+        {"claims": [], "summary": "Адрес доставки не установлен", "refusal_reason": None},
+        {**base_facts, "dates": [
+            {"event_type": "delivery", "value": "2024-10-02"},
+            {"event_type": "spec_signed", "value": "2024-10-02"},
+        ]},
+        {
+            "claims": [{"text": expected_claim, "fragment_ids": [fragment_id]}],
+            "summary": "",
+            "refusal_reason": None,
+        },
+        {"supported_indices": [0]},
+    ])
+    inputs: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        inputs.append(json.loads(payload["messages"][-1]["content"]))
+        return httpx.Response(200, json={
+            "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(next(responses))}}]
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr(llm_client.httpx, "post", client.post)
+
+        clarification = assistant.answer([question])
+        assert clarification.status == "clarify"
+        assert clarification.missing_fact == "дата подписания спецификации"
+        assert "Для выбора применимой редакции" in clarification.text
+        assert clarification.sources == []
+        assert all(fragment["clause"] != "3.2" for fragment in inputs[1]["fragments"])
+
+        answer = assistant.answer([
+            question,
+            Message("assistant", clarification.text),
+            Message("user", "Спецификацию подписали 02.10.2024."),
+        ])
+
+    assert len(inputs) == 5
+    assert answer.status == "full"
+    assert answer.text == expected_claim
+    assert answer.missing_fact is None
+    assert len(answer.sources) == 1
+    source = answer.sources[0]
+    assert source.fragment_id == fragment_id
+    assert source.clause == "3.2"
+    assert source.revision_label == "Допсоглашение № 1"
+    assert (source.line_start, source.line_end) == (6, 7)
+    assert "Спецификации на которые подписаны после 1 октября 2024 г." in source.quote
+    assert inputs[4]["claims"][0]["fragments"][0]["text"] == source.quote
