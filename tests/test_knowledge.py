@@ -248,6 +248,20 @@ def test_unclassified_date_does_not_select_current_law(
     assert selected.missing_fact == "дата события, к которому относится вопрос"
 
 
+def test_unclassified_date_keeps_law_wording_confirmed_by_catalogue(
+    corpus: tuple[SQLiteKnowledgeStore, Path],
+) -> None:
+    store, _ = corpus
+    query = QueryFacts(
+        "Главбух приступил к работе 02.09.2026. Какой максимальный срок испытания по ст. 70 ТК РФ?",
+        search_queries=["предельный срок испытания для главного бухгалтера"],
+        dates=[EventDate("unknown", date(2026, 9, 2))],
+    )
+    selected = select(store, search(store, query), query)
+    assert selected.missing_fact is None
+    assert any("главных бухгалтеров" in fragment.text.lower() for fragment in selected.applicable)
+
+
 def test_incomplete_build_keeps_previous_catalogue(tmp_path: Path) -> None:
     raw = tmp_path / "raw"
     raw.mkdir()

@@ -112,15 +112,21 @@ def select(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts: Query
         label = f"{candidate.document_title}, {candidate.clause}"
         fact = FACT_NAMES.get(event_type, "дата события, к которому относится вопрос")
         is_law = any(row["kind"] == "law" for row in versions)
-        if not relevant_dates and (amendments or versions_event == "deal" and dates
-                                   or is_law and dates.get("unknown")):
+        if not relevant_dates and (amendments or versions_event == "deal" and dates):
             required_facts.add(fact)
             result.gaps.append(f"Для выбора применимой редакции ({label}) нужна {fact}.")
             continue
 
-        checks = dates_to_check(relevant_dates, versions, rows)
+        # An unclassified date is enough only if the catalogue confirms the
+        # same wording throughout the period it could refer to.
+        unknown_law_dates = dates.get("unknown") if is_law and not relevant_dates else None
+        checks = dates_to_check(unknown_law_dates or relevant_dates, versions, rows)
         selections = [fragment_at(versions, rows, amendments, when) for when in checks]
         fragment_ids = {row["fragment_id"] if row is not None else None for _, row in selections}
+        if unknown_law_dates and None in fragment_ids:
+            required_facts.add(fact)
+            result.gaps.append(f"Для выбора применимой редакции ({label}) нужна {fact}.")
+            continue
         if len(fragment_ids) > 1:
             required_facts.add(fact)
             result.gaps.append(f"В указанные даты применяются разные положения ({label}). Нужна точная {fact}.")
