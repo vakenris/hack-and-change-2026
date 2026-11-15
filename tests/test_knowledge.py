@@ -73,6 +73,39 @@ def test_structured_contract_and_statute(corpus: tuple[SQLiteKnowledgeStore, Pat
     assert len(candidates) == 1 and candidates[0].line_start == 13
 
 
+def test_mixed_contract_point_and_statute_keep_both_sources(
+    corpus: tuple[SQLiteKnowledgeStore, Path],
+) -> None:
+    store, _ = corpus
+    query = QueryFacts("Входит ли НДС по п. 2.1 договора П-17/2024 и какая ставка по ст. 164 НК РФ?")
+    result = select(store, search(store, query), query)
+    assert any(fragment.clause == "2.1" and "П-17/2024" in fragment.document_title for fragment in result.applicable)
+    assert any(fragment.clause.startswith("ст. 164") for fragment in result.applicable)
+
+
+def test_mixed_contract_point_and_explicit_law_part_are_searchable(
+    corpus: tuple[SQLiteKnowledgeStore, Path],
+) -> None:
+    store, _ = corpus
+    query = QueryFacts("Что указано в п. 2.1 договора П-17/2024 и в ч. 2 ст. 9 152-ФЗ?")
+    result = search(store, query)
+    assert [fragment.clause for fragment in result] == ["2.1", "ст. 9, п. 2"]
+
+
+@pytest.mark.parametrize(("question", "document", "clause"), [
+    ("По договору с «Северным Складом» нас должны пропускать ночью?", "А-08/2024", "4.3"),
+    ("По договору с «Альфа-Трейдинг» можно оплатить технику авансом?", "ПТ-05/2023", "4.2"),
+    ("В юротдел нужно отнести сразу или есть какой-то срок?", "РЕГЛАМЕНТ СОГЛАСОВАНИЯ", "3.2"),
+])
+def test_search_ranks_colloquial_queries_by_relevant_provision(
+    corpus: tuple[SQLiteKnowledgeStore, Path], question: str, document: str, clause: str,
+) -> None:
+    store, _ = corpus
+    candidates = search(store, QueryFacts(question))
+    assert document in candidates[0].document_title
+    assert candidates[0].clause == clause
+
+
 @pytest.mark.parametrize(("when", "revision", "threshold"), [
     (date(2025, 2, 28), "Редакция от 10.01.2023", "10 000 000"),
     (date(2025, 3, 1), "Редакция от 01.03.2025", "15 000 000"),

@@ -98,17 +98,13 @@ class TestAssistantML:
         })
 
     def test_delivery_date_requests_specification_date(self) -> None:
-        self.responses = [
-            self.facts_response,
-            {"claims": [], "summary": "Адрес доставки не установлен", "refusal_reason": None},
-        ]
+        self.responses = [self.facts_response]
         answer = self.assistant.answer(self.messages)
         assert self.facts.question == self.messages[-1].content
         assert self.facts.document_refs == ["П-17/2024"]
         assert self.facts.dates == [EventDate("delivery", date(2024, 10, 2))]
         assert self.request_data[0]["messages"][0]["content"] == self.messages[0].content
-        assert self.request_data[1]["facts"]["dates"] == self.facts_response["dates"]
-        assert self.request_data[1]["fragments"] == []
+        assert len(self.request_data) == 1
         assert answer.status == "clarify"
         assert answer.missing_fact == "дата подписания спецификации"
         assert "Дата доставки не определяет" in answer.text
@@ -197,15 +193,35 @@ class TestAssistantML:
 
     def test_refusal_names_missing_historical_revision(self) -> None:
         self.selection = Selection(gaps=["В базе отсутствует нужная историческая редакция"])
-        self.responses = [
-            self.facts_response,
-            {"claims": [], "summary": "", "refusal_reason": None},
-        ]
+        self.responses = [self.facts_response]
         answer = self.assistant.answer(self.messages)
         assert answer.status == "refusal"
         assert answer.refusal_reason is not None
         assert "историческая редакция" in answer.refusal_reason
         assert answer.missing_fact is None
+
+    def test_malformed_claim_does_not_discard_verified_claim(self) -> None:
+        self.selection = Selection(applicable=[self.fragment])
+        supported = "Товар доставляется на склад № 1."
+        self.responses = [
+            self.facts_response,
+            {
+                "claims": [
+                    {"text": supported, "fragment_ids": ["F-17"]},
+                    {"text": "Штраф составляет 10%.", "fragment_ids": []},
+                ],
+                "summary": "",
+                "refusal_reason": None,
+            },
+            {"supported_indices": [0]},
+        ]
+
+        answer = self.assistant.answer(self.messages)
+
+        assert answer.status == "partial"
+        assert [claim.text for claim in answer.claims] == [supported]
+        assert "10%" not in answer.text
+        assert [source.fragment_id for source in answer.sources] == ["F-17"]
 
     @pytest.mark.parametrize(
         ("response", "error"),
@@ -250,6 +266,7 @@ class TestAssistantML:
             self.assistant.answer(self.messages)
 
     def test_non_string_refusal_reason_raises_technical_error(self) -> None:
+        self.selection = Selection()
         self.responses = [
             self.facts_response,
             {"claims": [], "summary": "", "refusal_reason": ["out_of_scope"]},

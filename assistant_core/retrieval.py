@@ -3,16 +3,28 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from itertools import zip_longest
 
 from .contracts import Fragment, QueryFacts
 from .knowledge_store import FRAGMENT_COLUMNS, SQLiteKnowledgeStore, contract_numbers, normalize, search_text
 
-CLAUSE_REF = re.compile(r"(?<!\w)(?:пп?\.|пункт(?:а|у|ом|е|ы|ов)?)\s*(\d+(?:\.\d+)*(?:-\d+)?)\b")
-ARTICLE_REF = re.compile(r"(?<!\w)(?:ст\.|стать(?:я|и|ю|е))\s*(\d+(?:[.\-]\d+)*)\b")
+PROVISION_NUMBER = r"\s*(\d+(?:\.\d+)*(?:-\d+)?)\b"
+CLAUSE_PATTERN = r"(?<!\w)(?:пп?\.|пункт(?:а|у|ом|е|ы|ов)?)" + PROVISION_NUMBER
+ARTICLE_PATTERN = r"(?<!\w)(?:ст\.|стать(?:я|и|ю|е))\s*(\d+(?:[.\-]\d+)*)\b"
+CLAUSE_REF = re.compile(CLAUSE_PATTERN)
+ARTICLE_REF = re.compile(ARTICLE_PATTERN)
+LAW_CLAUSE_REF = re.compile(
+    rf"(?:{CLAUSE_PATTERN}|(?<!\w)(?:ч\.|част[ьи]){PROVISION_NUMBER})[^\S\r\n]+{ARTICLE_PATTERN}"
+)
 BARE_CLAUSE = re.compile(r"\d+(?:\.\d+)+")
 STOP_WORDS = frozenset(
     "а без бы в во для до за и из или к ко ли на не но о об от по под при с со у что это я мы как "
     "какой какая какое можно нужно должны можем договор договора договору договором руб рублей п ст рф ооо".split()
+)
+QUERY_EXPANSIONS = (
+    (re.compile(r"\bаванс\w*\b"), "предоплата"),
+    (re.compile(r"\bюротдел\w*\b"), "юридический отдел"),
+    (re.compile(r"\bпропуск\w*\b"), "доступ"),
 )
 
 
@@ -26,8 +38,11 @@ def clause_numbers(facts: QueryFacts) -> set[str]:
 
 
 def match_expression(text: str) -> str:
+    text = search_text(text)
+    additions = " ".join(term for pattern, term in QUERY_EXPANSIONS if pattern.search(text))
     terms = dict.fromkeys(
-        term for term in search_text(text).split() if term not in STOP_WORDS and len(term) > 1 and not term.isdecimal()
+        term for term in f"{additions} {text}".split()
+        if term not in STOP_WORDS and len(term) > 1 and not term.isdecimal()
     )
     expressions = []
     for term in list(terms)[:48]:
@@ -39,41 +54,10 @@ def match_expression(text: str) -> str:
     return " OR ".join(dict.fromkeys(expressions))
 
 
-def search(store: SQLiteKnowledgeStore, facts: QueryFacts, limit: int = 12) -> list[Fragment]:
-    if limit <= 0:
-        return []
-    references = "\n".join(facts.document_refs)
-    text = "\n".join([facts.question, references, *facts.search_queries])
-    explicit_text = normalize("\n".join((facts.question, references)))
-    fallback_text = normalize(text)
-    numbers = contract_numbers(references) or contract_numbers(facts.question) or contract_numbers(text)
-    articles = set(ARTICLE_REF.findall(explicit_text) or ARTICLE_REF.findall(fallback_text))
-    clauses = clause_numbers(facts)
-
-    refs: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
-    for row in store.read("SELECT family_id, kind, value FROM refs"):
-        refs[row["kind"]][row["value"]].add(row["family_id"])
-
-    families: set[str] | None = None
-    if numbers or articles:
-        families = set().union(*(refs["contract"].get(number, set()) for number in numbers))
-        law_families = set().union(*(refs["article"].get(article, set()) for article in articles))
-        padded = f" {search_text(text)} "
-        codes = [code for code in refs["code"] if f" {search_text(code)} " in padded]
-        if codes:
-            law_families.intersection_update(set().union(*(refs["code"][code] for code in codes)))
-        families.update(law_families)
-    else:
-        for source in ("\n".join((facts.question, references)), text):
-            padded = f" {search_text(source)} "
-            matches = [value for value in refs["party"] if f" {value} " in padded and value != "меридиан"]
-            matches += [value for value in refs["title"] if f" {value} " in padded]
-            if matches:
-                families = set().union(*(refs[kind].get(value, set()) for kind in ("party", "title") for value in matches))
-                break
-
-    if families is not None and not families:
-        return []
+def ranked_fragments(
+    store: SQLiteKnowledgeStore, facts: QueryFacts, text: str,
+    families: set[str] | None, clauses: set[str], limit: int,
+) -> list[Fragment]:
     conditions = []
     parameters: list[str | int] = []
     if families is not None:
@@ -111,3 +95,58 @@ def search(store: SQLiteKnowledgeStore, facts: QueryFacts, limit: int = 12) -> l
         if not rows and families is not None:
             rows = store.read(select + where + " ORDER BY f.source_path, f.line_start LIMIT ?", (*parameters, limit))
     return [Fragment(**dict(row)) for row in rows]
+
+
+def search(store: SQLiteKnowledgeStore, facts: QueryFacts, limit: int = 12) -> list[Fragment]:
+    if limit <= 0:
+        return []
+    references = "\n".join(facts.document_refs)
+    explicit = "\n".join((facts.question, references))
+    text = "\n".join((explicit, *facts.search_queries))
+    numbers = contract_numbers(references) or contract_numbers(facts.question) or contract_numbers(text)
+    articles = set(ARTICLE_REF.findall(normalize(explicit)) or ARTICLE_REF.findall(normalize(text)))
+    clauses = clause_numbers(facts)
+
+    refs: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    for row in store.read("SELECT family_id, kind, value FROM refs"):
+        refs[row["kind"]][row["value"]].add(row["family_id"])
+
+    named: set[str] = set()
+    for source in (explicit, text):
+        padded = f" {search_text(source)} "
+        padded = re.sub(r"\bсеверн(?:ым|ого|ому|ом) склад(?:ом|а|у|е)\b", "северный склад", padded)
+        for kind in ("party", "title"):
+            for name, families in refs[kind].items():
+                if name != "меридиан" and f" {name} " in padded:
+                    named.update(families)
+        if named:
+            break
+
+    if not numbers and not articles:
+        return ranked_fragments(store, facts, text, named or None, clauses, limit)
+
+    # Search exact references independently so a clause of one document
+    # cannot filter out the article or clauses of a different document.
+    law_clauses: dict[str, set[str]] = defaultdict(set)
+    for point, part, article in LAW_CLAUSE_REF.findall(normalize(text)):
+        law_clauses[article].add(point or part)
+    non_law_clauses = clauses - set().union(*law_clauses.values())
+    groups: dict[str, set[str]] = {}
+    for number in sorted(numbers):
+        for family in sorted(refs["contract"].get(number, set())):
+            groups[family] = non_law_clauses
+    if articles:
+        for family in sorted(named):
+            groups.setdefault(family, non_law_clauses)
+    padded = f" {search_text(text)} "
+    codes = [code for code in refs["code"] if f" {search_text(code)} " in padded]
+    code_families = set().union(*(refs["code"][code] for code in codes))
+    for article in sorted(articles):
+        families = refs["article"].get(article, set())
+        if codes:
+            families = families & code_families
+        for family in sorted(families):
+            groups[family] = law_clauses[article] or (clauses if len(articles) == 1 and not (numbers or named) else set())
+
+    ranked = [ranked_fragments(store, facts, text, {family}, scope, limit) for family, scope in groups.items()]
+    return [fragment for row in zip_longest(*ranked) for fragment in row if fragment is not None][:limit]

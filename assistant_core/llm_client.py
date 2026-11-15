@@ -160,19 +160,28 @@ def draft_answer(
         },
     )
     claims: list[Claim] = []
+    invalid_claim: TechnicalError | None = None
     for item in _array(result, "claims"):
-        if not isinstance(item, dict):
-            raise TechnicalError("В ответе модели ожидается объект вывода")
-        fragment_ids = _strings(item, "fragment_ids")
-        if not fragment_ids:
-            raise TechnicalError("Модель вернула вывод без ссылок на фрагменты")
-        claims.append(Claim(_string(item.get("text"), "text"), fragment_ids))
+        try:
+            if not isinstance(item, dict):
+                raise TechnicalError("В ответе модели ожидается объект вывода")
+            fragment_ids = _strings(item, "fragment_ids")
+            if not fragment_ids:
+                raise TechnicalError("Модель вернула вывод без ссылок на фрагменты")
+            claims.append(Claim(_string(item.get("text"), "text"), fragment_ids))
+        except TechnicalError as exc:
+            invalid_claim = exc
+    if invalid_claim is not None and not claims:
+        raise invalid_claim
     reason = result.get("refusal_reason")
     if "refusal_reason" not in result or (
         reason is not None and (not isinstance(reason, str) or reason != "out_of_scope")
     ):
         raise TechnicalError("Модель вернула неизвестную причину отказа")
-    return Draft(claims, _string(result.get("summary"), "summary", allow_empty=True), reason)
+    summary = _string(result.get("summary"), "summary", allow_empty=True)
+    if invalid_claim is not None and not summary:
+        summary = "Не удалось подтвердить все части ответа"
+    return Draft(claims, summary, reason)
 
 
 def verify_claims(claims: list[Claim], fragments: dict[str, Fragment]) -> list[Claim]:

@@ -15,6 +15,7 @@ from .contracts import (
     STATUS_REFUSAL,
     Answer,
     Deps,
+    Draft,
     Message,
     TechnicalError,
 )
@@ -54,7 +55,9 @@ class Assistant:
         selection = deps.select(candidates, facts)
         passed = {fragment.fragment_id: fragment for fragment in selection.applicable}
 
-        draft = deps.draft(messages, facts, selection.applicable)
+        draft = Draft()
+        if selection.applicable or not (selection.missing_fact or selection.gaps):
+            draft = deps.draft(messages, facts, selection.applicable)
         checked, rejected = citations.filter_claims(draft.claims, passed, deps.store)
         if rejected:
             logger.warning("Отброшены ссылки вне каталога или вне переданных фрагментов: %s", rejected)
