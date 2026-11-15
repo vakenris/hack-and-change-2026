@@ -10,6 +10,7 @@ STATUS_PARTIAL = "partial"
 STATUS_CLARIFY = "clarify"
 STATUS_REFUSAL = "refusal"
 STATUS_ERROR = "error"  # только в ответе веб-API при техническом сбое
+REFUSAL_UNLAWFUL = "unlawful_assistance"
 
 
 class TechnicalError(RuntimeError):
@@ -40,6 +41,7 @@ class QueryFacts:
     search_queries: list[str] = field(default_factory=list)
     document_refs: list[str] = field(default_factory=list)  # номера договоров, статей, пунктов
     dates: list[EventDate] = field(default_factory=list)
+    unlawful_request: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class Fragment:
     line_start: int  # номера строк в TXT с единицы, включительно
     line_end: int
     periods: tuple[str, ...] = ()
+    snapshot_as_of: str | None = None
 
 
 @dataclass

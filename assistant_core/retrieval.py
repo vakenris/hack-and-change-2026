@@ -28,6 +28,16 @@ QUERY_EXPANSIONS = (
     (re.compile(r"\bпропуск\w*\b"), "доступ"),
 )
 DEFAULT_RATE = re.compile(r"\b(?:основн\w*|общ\w*|стандартн\w*)\s+(?:налогов\w*\s+)?ставк\w*")
+DELIVERY_LOCATION = re.compile(
+    r"\b(?:адрес\w*|куда|мест[ое]\s+(?:поставки|доставки)|порядок\s+поставки|"
+    r"где\s+(?:наход\w*\s+)?(?:склад\w*|разгруж\w*|выгруж\w*|достав\w*)|"
+    r"на\s+как\w*\s+склад\w*|како\w*\s+склад\w*)\b"
+)
+SPECIFICATION_SLOT = (
+    "EXISTS (SELECT 1 FROM documents a JOIN fragments af USING (document_id) "
+    "WHERE a.kind = 'amendment' AND a.event_type = 'spec_signed' "
+    "AND a.family_id = d.family_id AND af.slot = f.slot)"
+)
 QUESTION_BOUNDARY = re.compile(
     r"(?<=[?;])\s+|,?\s+(?:и|а также)\s+(?=(?:как\w*|сколько|когда|нужн\w*|требу\w*|"
     r"вход\w*|можно|допускается)\b)", re.IGNORECASE,
@@ -55,11 +65,16 @@ def match_expression(text: str) -> str:
         expressions.append('"основная ставка"')
     for term in list(terms)[:48]:
         expressions.append(f'"{term}"')
-        if len(term) >= 6 and term.isalpha():
-            expressions.append(f'"{term[:max(5, len(term) - 3)]}"*')
-        elif term in {"акт", "срок"}:
+        if term in {"акт", "срок", "склад"}:
             expressions.append(f'"{term}"*')
+        elif len(term) >= 6 and term.isalpha():
+            expressions.append(f'"{term[:max(5, len(term) - 3)]}"*')
     return " OR ".join(dict.fromkeys(expressions))
+
+
+def seeks_delivery_location(facts: QueryFacts) -> bool:
+    text = search_text(" ".join((facts.question, *facts.search_queries)))
+    return bool(DELIVERY_LOCATION.search(text))
 
 
 def ranked_fragments(
@@ -78,17 +93,11 @@ def ranked_fragments(
             f"AND substr(f.clause, instr(f.clause, ', п. ') + 5) IN ({placeholders})))"
         )
         parameters.extend(sorted(clauses) * 2)
-    else:
-        query_text = search_text(" ".join((facts.question, *facts.search_queries)))
-        asks_address = any(phrase in query_text for phrase in ("адрес", "куда", "место поставки",
-                                                              "место доставки", "порядок поставки"))
-        if not asks_address and not any(event.event_type == "spec_signed" for event in facts.dates):
-            conditions.append("NOT EXISTS (SELECT 1 FROM documents a JOIN fragments af USING (document_id) "
-                              "WHERE a.kind = 'amendment' AND a.event_type = 'spec_signed' "
-                              "AND a.family_id = d.family_id AND af.slot = f.slot)")
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
     select = f"SELECT {FRAGMENT_COLUMNS} FROM fragments f JOIN documents d USING (document_id)"
-    query = match_expression(text)
+    asks_address = seeks_delivery_location(facts)
+    query = match_expression(f"{text} адрес доставка склад" if asks_address else text)
+    location_rank = f"{SPECIFICATION_SLOT} DESC, " if asks_address else ""
     if not query and families is None and not clauses:
         return []
     if clauses or not query:
@@ -98,6 +107,7 @@ def ranked_fragments(
         rows = store.read(
             select + " JOIN fragment_fts ON fragment_fts.rowid = f.rowid" + where + operator
             + "fragment_fts MATCH ? ORDER BY "
+            + location_rank
             + ("(instr(fragment_fts.context, 'основная ставка') > 0) DESC, "
                if DEFAULT_RATE.search(search_text(text)) else "")
             + "bm25(fragment_fts, 1.0, 0.3), f.source_path, f.line_start LIMIT ?",

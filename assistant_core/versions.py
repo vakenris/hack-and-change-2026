@@ -3,13 +3,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 import re
 from sqlite3 import Row
 
 from .contracts import Fragment, QueryFacts, Selection
 from .knowledge_store import FRAGMENT_COLUMNS, SQLiteKnowledgeStore, normalize
-from .retrieval import clause_numbers
+from .retrieval import clause_numbers, seeks_delivery_location
 
 FACT_NAMES = {
     "spec_signed": "дата подписания спецификации",
@@ -93,7 +93,10 @@ def select(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts: Query
         selected = select_period(store, candidates, replace(facts, dates=[*dates, *groups.get("", [])]))
         for fragment in selected.applicable:
             existing = applicable.get(fragment.fragment_id, fragment)
-            applicable[fragment.fragment_id] = replace(existing, periods=(*existing.periods, label))
+            applicable[fragment.fragment_id] = replace(
+                existing, periods=(*existing.periods, label),
+                snapshot_as_of=existing.snapshot_as_of or fragment.snapshot_as_of,
+            )
         result.gaps.extend(f"Период {label}. {gap}" for gap in dict.fromkeys(selected.gaps))
         if selected.missing_fact:
             missing.add(selected.missing_fact)
@@ -123,6 +126,7 @@ def select_period(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts
     if not families:
         return result
     explicit_clauses = clause_numbers(facts)
+    asks_location = seeks_delivery_location(facts)
     placeholders = ",".join("?" for _ in families)
     documents: dict[str, list[Row]] = defaultdict(list)
     for row in store.read(f"SELECT * FROM documents WHERE family_id IN ({placeholders})", families):
@@ -160,6 +164,10 @@ def select_period(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts
         label = f"{candidate.document_title}, {candidate.clause}"
         fact = FACT_NAMES.get(event_type, "дата события, к которому относится вопрос")
         is_law = any(row["kind"] == "law" for row in versions)
+        if amendments and not relevant_dates and not asks_location and candidate.clause not in explicit_clauses:
+            # An incidental address match should not raise a clarification
+            # about a specification for an unrelated delivery question.
+            continue
         if not relevant_dates and (amendments or versions_event == "deal" and dates):
             required_facts.add(fact)
             result.gaps.append(f"Для выбора применимой редакции ({label}) нужна {fact}.")
@@ -169,7 +177,14 @@ def select_period(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts
         # same wording throughout the period it could refer to.
         unknown_law_dates = dates.get("unknown") if is_law and not relevant_dates else None
         checks = dates_to_check(unknown_law_dates or relevant_dates, versions, rows)
-        selections = [fragment_at(versions, rows, amendments, when) for when in checks]
+        snapshot_as_of = None
+        lookup_dates = checks
+        if is_law and relevant_dates and len(versions) == 1 and versions[0]["valid_to"]:
+            end = versions[0]["valid_to"]
+            if all(when is not None and when >= end for when in checks):
+                snapshot_as_of = (date.fromisoformat(end) - timedelta(days=1)).isoformat()
+                lookup_dates = [snapshot_as_of]
+        selections = [fragment_at(versions, rows, amendments, when) for when in lookup_dates]
         fragment_ids = {row["fragment_id"] if row is not None else None for _, row in selections}
         if unknown_law_dates and None in fragment_ids:
             required_facts.add(fact)
@@ -191,8 +206,8 @@ def select_period(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts
                 result.gaps.append(f"В базе нет применимой редакции{at} ({label}).")
             continue
         result.applicable.append(Fragment(**{
-            key: chosen[key] for key in Fragment.__dataclass_fields__ if key != "periods"
-        }))
+            key: chosen[key] for key in Fragment.__dataclass_fields__ if key not in {"periods", "snapshot_as_of"}
+        }, snapshot_as_of=snapshot_as_of))
 
     if required_facts:
         result.missing_fact = ", ".join(sorted(required_facts))

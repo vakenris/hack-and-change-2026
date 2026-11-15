@@ -1,7 +1,10 @@
 """Политика ответа по результатам выбора редакции и проверки выводов."""
 from __future__ import annotations
 
+from datetime import date
+
 from .contracts import (
+    REFUSAL_UNLAWFUL,
     STATUS_CLARIFY,
     STATUS_FULL,
     STATUS_PARTIAL,
@@ -13,12 +16,32 @@ from .contracts import (
     Selection,
 )
 
+UNLAWFUL_NOTICE = "Не могу помочь с нарушением закона или обходом обязательных требований."
+
 
 def decide(
     facts: QueryFacts, selection: Selection, draft: Draft, verified: list[Claim]
 ) -> Decision:
     missing_fact = selection.missing_fact
     gaps = list(dict.fromkeys(gap.strip() for gap in selection.gaps if gap.strip()))
+    cited_ids = {key for claim in verified for key in claim.fragment_ids}
+    snapshots = {fragment.snapshot_as_of for fragment in selection.applicable
+                 if fragment.fragment_id in cited_ids and fragment.snapshot_as_of}
+    snapshot_notes = [
+        f"Приведены положения из выгрузки от {date.fromisoformat(snapshot):%d.%m.%Y}. "
+        "Применимость этих положений на запрошенную более позднюю дату не подтверждена."
+        for snapshot in sorted(snapshots)
+    ]
+    if draft.refusal_reason == REFUSAL_UNLAWFUL or facts.unlawful_request:
+        if verified:
+            text = "\n".join(claim.text for claim in verified)
+            note = " ".join([UNLAWFUL_NOTICE, *snapshot_notes])
+            return Decision(
+                STATUS_PARTIAL, f"{text}\n{note}",
+                refusal_reason=UNLAWFUL_NOTICE, note=note,
+            )
+        return Decision(STATUS_REFUSAL, UNLAWFUL_NOTICE, refusal_reason=UNLAWFUL_NOTICE)
+    gaps.extend(snapshot_notes)
     # Only echo parts of the user's question. A generated explanation of
     # a gap is not itself a verified legal statement.
     uncovered_parts = [

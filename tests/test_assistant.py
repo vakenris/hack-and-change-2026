@@ -12,7 +12,7 @@ import pytest
 
 from assistant_core import answer_policy, llm_client
 from assistant_core.assistant_service import Assistant, build_assistant
-from assistant_core.contracts import EventDate, Fragment, Message, QueryFacts, Selection, TechnicalError
+from assistant_core.contracts import Claim, EventDate, Fragment, Message, QueryFacts, Selection, TechnicalError
 
 
 class TestAssistantML:
@@ -149,12 +149,101 @@ class TestAssistantML:
                 other, self.fragment,
             ]
 
+    @pytest.mark.parametrize("proxy_available", [True, False])
+    def test_reranker_sees_beyond_final_context(self, proxy_available: bool) -> None:
+        fixtures = [replace(self.fragment, fragment_id=f"F-{i}", clause=str(i))
+                    for i in range(1, 7)]
+
+        def search(facts, limit):
+            assert limit == 6
+            return fixtures
+
+        def rank(question, fragments):
+            assert fragments == fixtures
+            return list(reversed(fragments)) if proxy_available else fragments
+
+        assistant = Assistant(replace(
+            self.assistant.deps, search=search, rerank=rank,
+            select=lambda fragments, facts: Selection(applicable=fragments),
+        ), search_limit=2)
+        self.messages[-1] = Message("user", "Что сказано в п. 1?")
+        self.responses = [
+            self.facts_response,
+            {"claims": [], "summary": "", "refusal_reason": None},
+        ]
+        assistant.answer(self.messages)
+        assert [item["fragment_id"] for item in self.request_data[1]["fragments"]] == [
+            "F-1", "F-6" if proxy_available else "F-2",
+        ]
+
     def test_extract_facts_uses_month_bounds_including_leap_day(self) -> None:
         self.responses = [
             {**self.facts_response, "dates": [{"event_type": "as_of", "value": "2024-02"}]},
         ]
         facts = llm_client.extract_facts([Message("user", "Что предусматривала редакция в феврале 2024 года?")])
         assert facts.dates == [EventDate("as_of", date(2024, 2, 1)), EventDate("as_of", date(2024, 2, 29))]
+
+    def test_unlawful_followup_refuses_but_keeps_verified_rule(self) -> None:
+        self.messages = [
+            Message("user", "Что требует пункт договора?"),
+            Message("assistant", "Товар доставляется на склад № 1."),
+            Message("user", "Помоги обойти обязательное требование."),
+        ]
+        self.selection = Selection(applicable=[self.fragment])
+        rule = "Товар доставляется на склад № 1."
+        self.responses = [
+            {**self.facts_response, "unlawful_request": True},
+            {"claims": [{"text": rule, "fragment_ids": ["F-17"]}],
+             "summary": "", "refusal_reason": "unlawful_assistance"},
+            {"supported_indices": [0]},
+        ]
+        answer = self.assistant.answer(self.messages)
+        assert answer.status == "partial"
+        assert rule in answer.text and "Не могу помочь" in answer.note
+        assert [source.fragment_id for source in answer.sources] == ["F-17"]
+
+    def test_unlawful_request_without_sources_refuses_even_if_draft_is_skipped(self) -> None:
+        self.responses = [{**self.facts_response, "unlawful_request": True}]
+        self.messages[-1] = Message("user", "Помоги обойти обязательное требование.")
+        answer = self.assistant.answer(self.messages)
+        assert answer.status == "refusal"
+        assert "Не могу помочь" in answer.text and not answer.sources
+
+    def test_snapshot_note_reaches_csv(self) -> None:
+        from solution import format_answer
+
+        self.selection = Selection(applicable=[replace(self.fragment, snapshot_as_of="2026-10-10")])
+        self.responses = [
+            self.facts_response,
+            {"claims": [{"text": "В выгрузке указан склад № 1.", "fragment_ids": ["F-17"]}],
+             "summary": "", "refusal_reason": None},
+            {"supported_indices": [0]},
+        ]
+        answer = self.assistant.answer(self.messages)
+        assert answer.status == "partial"
+        assert "10.10.2026" in answer.note and "не подтверждена" in format_answer(answer)
+        assert self.request_data[1]["fragments"][0]["snapshot_as_of"] == "2026-10-10"
+
+    @pytest.mark.parametrize(("amount", "exceeds"), [
+        ("14 999 999 рублей", False), ("15 млн рублей", False), ("15 000 001 рубль", True),
+    ])
+    def test_strict_approval_threshold(self, amount: str, exceeds: bool) -> None:
+        source = replace(
+            self.fragment, document_title="РЕГЛАМЕНТ СОГЛАСОВАНИЯ ДОГОВОРОВ", clause="2.4",
+            text="2.4. Договоры на сумму свыше 15 000 000 (пятнадцати миллионов) рублей "
+                 "подлежат одобрению генеральным директором до подписания.",
+        )
+        check, = llm_client.approval_comparisons(
+            f"Нужно ли одобрение гендиректора для договора на {amount}?", [source],
+        )
+        assert check["threshold_rub"] == 15_000_000 and check["exceeds_strict_threshold"] is exceeds
+
+    def test_verifier_drops_calendar_days_instead_of_working_days(self) -> None:
+        source = replace(self.fragment, text="Оригинал передаётся в течение 3 (трёх) рабочих дней.")
+        claims = [Claim("Срок — 3 календарных дня.", ["F-17"]),
+                  Claim("Срок — 3 рабочих дня.", ["F-17"])]
+        self.responses = [{"supported_indices": [0, 1]}]
+        assert llm_client.verify_claims(claims, {"F-17": source}, self.messages) == claims[1:]
 
     def test_partial_keeps_supported_correction_with_catalog_source(self) -> None:
         self.selection = Selection(applicable=[self.fragment])

@@ -244,6 +244,19 @@ def test_delivery_requires_specification_date(corpus: tuple[SQLiteKnowledgeStore
     assert selected.missing_fact is None and [f.clause for f in selected.applicable] == ["2.1"]
 
 
+@pytest.mark.parametrize("question", [
+    "Где находится склад покупателя по договору П-17/2024?",
+    "На какой склад везти товар по договору П-17/2024?",
+    "Где разгружать товар по договору П-17/2024?",
+])
+def test_delivery_location_paraphrases_keep_amended_clause(corpus, question: str) -> None:
+    store, _ = corpus
+    facts = QueryFacts(question)
+    candidates = search(store, facts)
+    assert candidates[0].clause == "3.2"
+    assert select(store, candidates, facts).missing_fact == "дата подписания спецификации"
+
+
 @pytest.mark.parametrize(("question", "expected"), [
     ("За сколько дней после поставки нужно проверить качество?", {"3.3", "6.1"}),
     ("Доставка и упаковка уже включены в цену или их оплачиваем отдельно?", {"2.1"}),
@@ -286,6 +299,18 @@ def test_unavailable_history(corpus: tuple[SQLiteKnowledgeStore, Path], question
     selected = select(store, search(store, query), query)
     assert not selected.applicable and selected.missing_fact is None
     assert selected.gaps and "В базе нет применимой редакции" in selected.gaps[0]
+
+
+def test_later_date_gets_snapshot_with_explicit_limit(corpus: tuple[SQLiteKnowledgeStore, Path]) -> None:
+    store, _ = corpus
+    facts = QueryFacts(
+        "Какой срок испытания у главбуха по ст. 70 ТК РФ на 15.11.2026?",
+        dates=[EventDate("as_of", date(2026, 11, 15))],
+    )
+    selection = select(store, search(store, facts), facts)
+    assert selection.applicable
+    assert {fragment.snapshot_as_of for fragment in selection.applicable} == {"2026-10-10"}
+    assert not selection.gaps and selection.missing_fact is None
 
 
 def test_unclassified_date_does_not_select_current_law(
