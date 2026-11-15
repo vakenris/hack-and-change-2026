@@ -105,7 +105,11 @@ def answer_one(raw: str, deadline: float) -> str:
         return FALLBACK
     try:
         if not hasattr(_local, "assistant"):
-            _local.assistant = build_assistant()
+            packaged_db = ROOT / "knowledge.sqlite"
+            db_path = os.environ.get("KNOWLEDGE_DB") or (
+                str(packaged_db) if packaged_db.is_file() else None
+            )
+            _local.assistant = build_assistant(db_path)
         text = format_answer(_local.assistant.answer(parse_dialogue(raw)))
         return text if text.strip() else FALLBACK
     except Exception:
@@ -114,7 +118,7 @@ def answer_one(raw: str, deadline: float) -> str:
 
 
 def main() -> int:
-    data_dir = Path(os.environ.get("DATA_DIR", "."))
+    data_dir = Path(os.environ.get("DATA_DIR") or "data")
     output = Path(os.environ.get("OUTPUT_PATH", "submission.csv"))
     budget = float(os.environ.get("TIME_BUDGET_SECONDS", "1080"))
     workers = max(1, int(os.environ.get("SOLUTION_WORKERS", "4")))

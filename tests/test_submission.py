@@ -5,6 +5,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+from scripts.build_knowledge import build
 from scripts.package_submission import build_zip
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +22,7 @@ ROWS = [
 ]
 
 
-def run_solution(workdir: Path, tmp_path: Path) -> dict:
+def run_solution(workdir: Path, tmp_path: Path) -> dict[str, str]:
     data_dir = tmp_path / "input"
     data_dir.mkdir(exist_ok=True)
     with open(data_dir / "questions.csv", "w", encoding="utf-8", newline="") as handle:
@@ -38,7 +39,7 @@ def run_solution(workdir: Path, tmp_path: Path) -> dict:
     return {row["id"]: row["answer"] for row in rows}
 
 
-def check(answers: dict) -> None:
+def check(answers: dict[str, str]) -> None:
     assert all(text.strip() for text in answers.values())
     assert "склад № 2" in answers["q1"]
     assert "Договор поставки № П-17/2024, п. 3.2" in answers["q1"]
@@ -48,16 +49,62 @@ def check(answers: dict) -> None:
     assert "F-999" not in "".join(answers.values())
 
 
-def test_csv_format_and_independence(tmp_path):
+def test_csv_format_and_independence(tmp_path: Path) -> None:
     check(run_solution(ROOT, tmp_path))
 
 
-def test_runs_from_unpacked_zip(tmp_path):
-    archive = build_zip(tmp_path / "submission.zip", strict=False)
+def test_runs_from_unpacked_zip(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "contract.txt").write_text("ДОГОВОР\n1. Условия\n1.1. Срок оплаты — 5 дней.\n", encoding="utf-8")
+    catalogue = tmp_path / "catalogue"
+    assert build(raw, catalogue, expected_count=1)["published"]
+    archive = build_zip(tmp_path / "submission.zip", database=catalogue / "knowledge.sqlite")
     target = tmp_path / "unpacked"
     with zipfile.ZipFile(archive) as handle:
         names = handle.namelist()
+        assert all(Path(name).name == name for name in names)
+        assert {"solution.py", "requirements.txt", "assistant_core.py", "knowledge.sqlite"} <= set(names)
         handle.extractall(target)
-    assert "solution.py" in names
-    assert "requirements.txt" in names
-    check(run_solution(target, tmp_path))
+
+    data_dir = target / "data"
+    data_dir.mkdir()
+    (data_dir / "questions.csv").write_text("id,question\n1,Какой срок оплаты по п. 1.1?\n", encoding="utf-8")
+    env = dict(os.environ, ASSISTANT_STUB="0", LLM_BASE_URL="https://model.example",
+               LLM_API_KEY="test-key", LLM_MODEL="test-model", SOLUTION_WORKERS="1")
+    for name in ("DATA_DIR", "KNOWLEDGE_DB", "OUTPUT_PATH"):
+        env.pop(name, None)
+
+    # Isolated Python can only load the assistant from the unpacked submission.
+    runner = """
+import json
+import runpy
+
+import httpx
+
+def respond(request: httpx.Request) -> httpx.Response:
+    payload = json.loads(request.content)
+    data = json.loads(payload["messages"][-1]["content"])
+    if "fragments" in data:
+        fragment, = data["fragments"]
+        assert "Срок оплаты — 5 дней." in fragment["text"]
+        result = {"claims": [{"text": "Срок оплаты — 5 дней.", "fragment_ids": [fragment["fragment_id"]]}],
+                  "summary": "", "refusal_reason": None}
+    elif "claims" in data:
+        result = {"supported_indices": [0]}
+    else:
+        result = {"search_queries": ["срок оплаты"], "document_refs": ["п. 1.1"], "dates": []}
+    return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}]})
+
+with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+    httpx.post = client.post
+    runpy.run_path("solution.py", run_name="__main__")
+"""
+    subprocess.run([sys.executable, "-I", "-c", runner], cwd=target, env=env, check=True, timeout=120)
+    with (target / "submission.csv").open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames == ["id", "answer"]
+        row, = list(reader)
+    assert row["id"] == "1"
+    assert "Срок оплаты — 5 дней." in row["answer"]
+    assert "ДОГОВОР, 1.1" in row["answer"]

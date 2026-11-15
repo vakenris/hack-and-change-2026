@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 MAX_BYTES = 128 * 1024 * 1024
 
 CORE_MODULES = [
-    "__init__.py",
     "contracts.py",
     "assistant_service.py",
     "citations.py",
@@ -21,24 +20,31 @@ CORE_MODULES = [
     "llm_prompts.py",
     "answer_policy.py",
 ]
-# пары: путь в репозитории, путь в архиве
-FILES = [("solution.py", "solution.py"), ("submission-requirements.txt", "requirements.txt")]
-FILES += [(f"assistant_core/{name}", f"assistant_core/{name}") for name in CORE_MODULES]
-FILES += [
-    ("data/processed/knowledge.sqlite", "data/processed/knowledge.sqlite"),
-    ("data/processed/manifest.json", "data/processed/manifest.json"),
-]
+PACKAGE_ENTRY = '''"""Expose the flat submission modules as the assistant_core package."""
+from pathlib import Path
+
+__path__ = [str(Path(__file__).resolve().parent)]
+'''
 
 
-def build_zip(output: Path, strict: bool = True) -> Path:
-    missing = [source for source, _ in FILES if not (ROOT / source).is_file()]
+def build_zip(output: Path, strict: bool = True, *, database: Path | None = None) -> Path:
+    if database is None:
+        database = ROOT / "data/processed/knowledge.sqlite"
+    files = [
+        (ROOT / "solution.py", "solution.py"),
+        (ROOT / "submission-requirements.txt", "requirements.txt"),
+        (database, "knowledge.sqlite"),
+    ]
+    files.extend((ROOT / "assistant_core" / name, name) for name in CORE_MODULES)
+    missing = [str(source) for source, _ in files if not source.is_file()]
     if missing and strict:
         raise SystemExit("Нет файлов для архива: " + ", ".join(missing))
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        for source, target in FILES:
-            if (ROOT / source).is_file():
-                archive.write(ROOT / source, target)
+        archive.writestr("assistant_core.py", PACKAGE_ENTRY)
+        for source, target in files:
+            if source.is_file():
+                archive.write(source, target)
     size = output.stat().st_size
     if size > MAX_BYTES:
         raise SystemExit(f"Архив {size / 1024 / 1024:.1f} МБ больше лимита 128 МБ")
