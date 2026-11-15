@@ -57,17 +57,23 @@ def test_csv_format_and_independence(tmp_path: Path) -> None:
 
 def test_csv_keeps_each_claim_with_its_own_citation() -> None:
     old = SourceCard("f1", "d1", "Договор", "Редакция 1", "2.1", "Срок оплаты — 5 дней.", 1, 1)
-    new = SourceCard("f2", "d2", "Регламент", "Редакция 2", "3.2", "Свыше 15 миллионов.", 2, 2)
+    new = SourceCard(
+        "f2", "d2", "Регламент", "Редакция 2", "3.2",
+        "Одобрение требуется для договоров на сумму свыше 15 миллионов.", 2, 2,
+    )
     answer = Answer(
         "partial", "Сводный ответ",
-        claims=[Claim("Срок — пять дней.", ["f1"]), Claim("Действует порог.", ["f2"]),
+        claims=[Claim("Срок — пять дней.", ["f1"]), Claim("Одобрение нужно при сумме более 15 миллионов.", ["f2"]),
                 Claim("слишком длинный " * MAX_ANSWER_CHARS, ["f2"])],
         sources=[old, new], note="Порядок уведомления в базе не указан.",
     )
     text = format_answer(answer)
     first, second, note = text.split("\n\n")
-    assert "Договор, 2.1 (Редакция 1)" in first and "Регламент" not in first
-    assert old.quote in first and new.quote in second
+    assert first == "Срок — пять дней. [Договор, 2.1 (Редакция 1)]"
+    assert second == (
+        "Одобрение нужно при сумме более 15 миллионов. [Регламент, 3.2 (Редакция 2)]"
+        " «свыше 15 миллионов»"
+    )
     assert "Порядок уведомления" in note and "ограничения длины" in note
     assert len(text) <= MAX_ANSWER_CHARS
 
