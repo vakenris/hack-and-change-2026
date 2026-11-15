@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Юридический ассистент по документам кейса ПСБ">
+  <title>Юридический ассистент · ПСБ</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/chat.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">§</span>
+        <h1>Юридический ассистент</h1>
+      </div>
+      <button type="button" class="quiet-button" id="new-chat">
+        Новый диалог
+      </button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <section class="chat" aria-label="Диалог">
+      <div class="conversation" id="conversation">
+        <div class="welcome" id="welcome">
+          <h2>Какой у вас вопрос?</h2>
+          <div class="examples" aria-label="Примеры вопросов">
+            <button type="button" data-prompt="Какой адрес доставки по договору П-17/2024?">
+              Какой адрес доставки по договору П‑17/2024?
+            </button>
+            <button type="button" data-prompt="Какой максимальный срок испытания можно установить главному бухгалтеру?">
+              Каков максимальный испытательный срок для главбуха?
+            </button>
+            <button type="button" data-prompt="В августе 2024 года заключили договор на 12 млн рублей. Требовалось ли одобрение генерального директора?">
+              Нужно ли было одобрение договора на 12 млн ₽ в августе 2024 года?
+            </button>
+          </div>
+        </div>
+        <ol class="messages" id="messages" aria-label="История диалога" aria-live="polite" aria-relevant="additions"></ol>
+        <div class="feedback" id="chat-feedback" role="status"></div>
+        <div class="chat-error" id="chat-error" hidden>
+          <p id="chat-error-text" role="alert"></p>
+          <button type="button" class="quiet-button" id="retry">Повторить запрос</button>
+        </div>
+      </div>
+
+      <form class="composer" id="composer">
+        <label class="visually-hidden" for="question">Ваш вопрос</label>
+        <div class="input-row">
+          <textarea id="question" name="question" maxlength="20000" rows="2"
+            placeholder="Введите вопрос" required></textarea>
+          <button class="primary-button" id="send" type="submit">Отправить</button>
+        </div>
+      </form>
+    </section>
+
+    <aside class="sources" id="sources-panel" aria-labelledby="sources-heading" tabindex="-1" hidden>
+      <div class="sources-heading">
+        <h2 id="sources-heading">Источник</h2>
+        <button class="quiet-button" id="close-source" type="button">Закрыть</button>
+      </div>
+      <div class="source-body" id="source-body">
+        <p class="source-feedback" id="source-feedback" role="status" hidden></p>
+        <article class="source-card" id="source-card" hidden>
+          <h3 id="source-title"></h3>
+          <p class="source-meta" id="source-meta"></p>
+          <blockquote id="source-quote"></blockquote>
+          <button class="quiet-button" id="open-document" type="button">Открыть документ</button>
+          <p class="source-feedback" id="document-feedback" role="status" hidden></p>
+          <section class="document" id="document-view" aria-label="Текст источника" hidden>
+            <p class="visually-hidden" id="document-lines-label"></p>
+            <ol class="document-lines" id="document-lines" aria-label="Строки документа"
+              aria-describedby="document-lines-label" tabindex="0"></ol>
+          </section>
+        </article>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>
