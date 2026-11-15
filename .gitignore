@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Настройки IDE
+/.idea/
+
 # Виртуальные окружения
 /.venv/
 /venv/
