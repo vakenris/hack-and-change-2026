@@ -45,6 +45,7 @@ class TestAssistantML:
             "OPENAI_MODEL": "",
             "GEN_MODEL": "platform-model",
             "LLM_TIMEOUT": "5",
+            "LLM_RETRIES": "0",
             "TEMPERATURE": "0.1",
             "MAX_TOKENS": "800",
             "ASSISTANT_STUB": "1",
@@ -111,6 +112,42 @@ class TestAssistantML:
         assert "дата подписания спецификации" in answer.text
         assert answer.sources == []
         assert self.responses == []
+
+    def test_proxy_retries_a_transient_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_RETRIES", "1")
+        self.responses = [httpx.Response(429, headers={"Retry-After": "0"}), self.facts_response]
+        answer = self.assistant.answer(self.messages)
+        assert answer.status == "clarify"
+        assert len(self.request_data) == 2
+
+    def test_fact_extraction_preserves_period_labels(self) -> None:
+        self.responses = [dict(self.facts_response, dates=[
+            {"event_type": "deal", "value": "2024-08", "period": "1"},
+            {"event_type": "deal", "value": "2025-03", "period": "2"},
+        ])]
+        facts = llm_client.extract_facts(self.messages)
+        assert facts.dates == [
+            EventDate("deal", date(2024, 8, 1), "1"), EventDate("deal", date(2024, 8, 31), "1"),
+            EventDate("deal", date(2025, 3, 1), "2"), EventDate("deal", date(2025, 3, 31), "2"),
+        ]
+        assert self.responses == []
+
+    def test_optional_rerank_preserves_unranked_sources(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("RERANKER_MODEL", "qwen-test")
+        monkeypatch.setenv("RERANKER_TOP_N", "1")
+        other = replace(self.fragment, fragment_id="F-42")
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/rerank"
+            request_data = json.loads(request.content)
+            assert request_data["top_n"] == 1 and len(request_data["documents"]) == 2
+            return httpx.Response(200, json={"results": [{"index": 1}]})
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            monkeypatch.setattr(llm_client.httpx, "post", client.post)
+            assert llm_client.rerank_fragments("Куда доставлять?", [self.fragment, other]) == [
+                other, self.fragment,
+            ]
 
     def test_extract_facts_uses_month_bounds_including_leap_day(self) -> None:
         self.responses = [

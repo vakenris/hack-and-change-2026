@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import citations
+from .runtime import stage
 from .contracts import (
     STATUS_CLARIFY,
     STATUS_FULL,
@@ -50,22 +51,39 @@ class Assistant:
 
     def _run(self, messages: list[Message]) -> Answer:
         deps = self.deps
-        facts = deps.extract_facts(messages)
-        candidates = deps.search(facts, self.search_limit)
-        selection = deps.select(candidates, facts)
+        with stage("facts"):
+            facts = deps.extract_facts(messages)
+        with stage("search"):
+            clarification = deps.clarify(facts) if deps.clarify else None
+            if clarification:
+                missing, options = clarification
+                return Answer(
+                    STATUS_CLARIFY, f"Под описание подходят {options}. Укажите контрагента или номер договора.",
+                    missing_fact=missing,
+                )
+            candidates = deps.search(facts, self.search_limit)
+        with stage("versions"):
+            selection = deps.select(candidates, facts)
+        if deps.rerank and len(selection.applicable) > 1:
+            with stage("rerank"):
+                selection.applicable = deps.rerank(facts.question, selection.applicable)
         passed = {fragment.fragment_id: fragment for fragment in selection.applicable}
 
         draft = Draft()
-        if selection.applicable or not (selection.missing_fact or selection.gaps):
-            draft = deps.draft(messages, facts, selection.applicable)
-        checked, rejected = citations.filter_claims(draft.claims, passed, deps.store)
+        with stage("draft"):
+            if selection.applicable or not (selection.missing_fact or selection.gaps):
+                draft = deps.draft(messages, facts, selection.applicable)
+            checked, rejected = citations.filter_claims(draft.claims, passed, deps.store)
         if rejected:
-            logger.warning("Отброшены ссылки вне каталога или вне переданных фрагментов: %s", rejected)
+            logger.warning("Отброшены ссылки вне каталога или контекста. Количество %d.", len(rejected))
 
-        verified = deps.verify(checked, passed) if checked else []
-        verified, _ = citations.filter_claims(verified, passed, deps.store)
+        with stage("verify"):
+            verified = deps.verify(checked, passed, messages) if checked else []
+            verified, _ = citations.filter_claims(verified, passed, deps.store)
 
-        decision = deps.decide(facts, selection, draft, verified)
+        with stage("answer"):
+            decision = deps.decide(facts, selection, draft, verified)
+            sources = citations.build_sources(verified, deps.store)
         status = decision.status
         text = (decision.text or "").strip()
         reason = decision.refusal_reason
@@ -81,9 +99,10 @@ class Assistant:
             status=status,
             text=text,
             claims=verified,
-            sources=citations.build_sources(verified, deps.store),
+            sources=sources,
             missing_fact=decision.missing_fact,
             refusal_reason=reason,
+            note=decision.note,
         )
 
 
@@ -116,6 +135,8 @@ def build_assistant(db_path: Optional[str] = None) -> Assistant:
             draft=llm_client.draft_answer,
             verify=llm_client.verify_claims,
             decide=answer_policy.decide,
+            clarify=lambda facts: retrieval.counterparty_clarification(store, facts),
+            rerank=llm_client.rerank_fragments if os.environ.get("RERANKER_ENABLED") == "1" else None,
         )
     )
 

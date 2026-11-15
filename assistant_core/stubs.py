@@ -92,7 +92,7 @@ def _draft(messages: list[Message], facts: QueryFacts, fragments: list[Fragment]
     return Draft(claims=claims)
 
 
-def _verify(claims: list[Claim], fragments: dict[str, Fragment]) -> list[Claim]:
+def _verify(claims: list[Claim], fragments: dict[str, Fragment], messages: list[Message]) -> list[Claim]:
     return claims
 
 
@@ -119,7 +119,8 @@ def _decide(
         )
     text = " ".join(claim.text for claim in verified)
     if selection.gaps:
-        return Decision(STATUS_PARTIAL, text + " Не подтверждено: " + "; ".join(selection.gaps) + ".")
+        note = "Не подтверждено: " + "; ".join(selection.gaps) + "."
+        return Decision(STATUS_PARTIAL, text + " " + note, note=note)
     return Decision(STATUS_FULL, text)
 
 

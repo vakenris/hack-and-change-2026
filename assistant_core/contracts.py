@@ -15,6 +15,11 @@ STATUS_ERROR = "error"  # только в ответе веб-API при тех�
 class TechnicalError(RuntimeError):
     """Сбой модели, базы или индекса. Не является юридическим отказом."""
 
+    def __init__(self, message: str, *, code: str = "technical_error") -> None:
+        super().__init__(message)
+        self.code = code
+        self.stage: str | None = None
+
 
 @dataclass(frozen=True)
 class Message:
@@ -26,6 +31,7 @@ class Message:
 class EventDate:
     event_type: str  # например "spec_signed", "delivery", "deal", "unknown"
     value: date
+    period: str = ""  # distinct comparison periods; empty for one event or interval
 
 
 @dataclass
@@ -48,6 +54,7 @@ class Fragment:
     source_path: str
     line_start: int  # номера строк в TXT с единицы, включительно
     line_end: int
+    periods: tuple[str, ...] = ()
 
 
 @dataclass
@@ -68,6 +75,7 @@ class Draft:
     claims: list[Claim] = field(default_factory=list)
     summary: str = ""
     refusal_reason: Optional[str] = None
+    unanswered: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -76,6 +84,7 @@ class Decision:
     text: str
     missing_fact: Optional[str] = None
     refusal_reason: Optional[str] = None
+    note: str = ""
 
 
 @dataclass
@@ -98,6 +107,7 @@ class Answer:
     sources: list[SourceCard] = field(default_factory=list)
     missing_fact: Optional[str] = None
     refusal_reason: Optional[str] = None
+    note: str = ""
 
 
 class KnowledgeStore(Protocol):
@@ -113,5 +123,7 @@ class Deps:
     select: Callable[[list[Fragment], QueryFacts], Selection]
     extract_facts: Callable[[list[Message]], QueryFacts]
     draft: Callable[[list[Message], QueryFacts, list[Fragment]], Draft]
-    verify: Callable[[list[Claim], dict[str, Fragment]], list[Claim]]
+    verify: Callable[[list[Claim], dict[str, Fragment], list[Message]], list[Claim]]
     decide: Callable[[QueryFacts, Selection, Draft, list[Claim]], Decision]
+    clarify: Callable[[QueryFacts], tuple[str, str] | None] | None = None
+    rerank: Callable[[str, list[Fragment]], list[Fragment]] | None = None

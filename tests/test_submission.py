@@ -7,6 +7,8 @@ from pathlib import Path
 
 from scripts.build_knowledge import build
 from scripts.package_submission import build_zip
+from assistant_core.contracts import Answer, Claim, SourceCard
+from solution import MAX_ANSWER_CHARS, format_answer
 
 ROOT = Path(__file__).resolve().parents[1]
 ROWS = [
@@ -51,6 +53,51 @@ def check(answers: dict[str, str]) -> None:
 
 def test_csv_format_and_independence(tmp_path: Path) -> None:
     check(run_solution(ROOT, tmp_path))
+
+
+def test_csv_keeps_each_claim_with_its_own_citation() -> None:
+    old = SourceCard("f1", "d1", "Договор", "Редакция 1", "2.1", "Срок оплаты — 5 дней.", 1, 1)
+    new = SourceCard("f2", "d2", "Регламент", "Редакция 2", "3.2", "Свыше 15 миллионов.", 2, 2)
+    answer = Answer(
+        "partial", "Сводный ответ",
+        claims=[Claim("Срок — пять дней.", ["f1"]), Claim("Действует порог.", ["f2"]),
+                Claim("слишком длинный " * MAX_ANSWER_CHARS, ["f2"])],
+        sources=[old, new], note="Порядок уведомления в базе не указан.",
+    )
+    text = format_answer(answer)
+    first, second, note = text.split("\n\n")
+    assert "Договор, 2.1 (Редакция 1)" in first and "Регламент" not in first
+    assert old.quote in first and new.quote in second
+    assert "Порядок уведомления" in note and "ограничения длины" in note
+    assert len(text) <= MAX_ANSWER_CHARS
+
+
+def test_stalled_http_cannot_hold_csv_past_deadline(tmp_path: Path) -> None:
+    (tmp_path / "questions.csv").write_text("id,question\n1,быстрый\n2,долгий\n3,ожидающий\n", encoding="utf-8")
+    output = tmp_path / "submission.csv"
+    runner = """
+import time
+import solution
+
+def answer(raw, deadline):
+    if raw == "быстрый":
+        return solution.RunResult("Есть подтверждение.", "full")
+    time.sleep(20)
+    raise AssertionError("the supervisor should have stopped")
+
+solution.answer_one = answer
+raise SystemExit(solution.main())
+"""
+    env = dict(os.environ, DATA_DIR=str(tmp_path), OUTPUT_PATH=str(output), TIME_BUDGET_SECONDS="0.5",
+               MAX_WORKERS="1", SOLUTION_WORKERS="3", SUBMISSION_DIAGNOSTICS="1")
+    run = subprocess.run([sys.executable, "-c", runner], cwd=ROOT, env=env, check=True,
+                         capture_output=True, timeout=8)
+    with output.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [row["id"] for row in rows] == ["1", "2", "3"]
+    assert rows[0]["answer"] == "Есть подтверждение."
+    assert all("технической ошибки" in row["answer"] for row in rows[1:])
+    assert b'"errors": {"deadline": 2}' in run.stderr
 
 
 def test_runs_from_unpacked_zip(tmp_path: Path) -> None:

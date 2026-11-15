@@ -119,6 +119,7 @@ button:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
 .message-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
 .message.user .message-text { border-radius: 11px 11px 3px 11px; background: var(--pale-blue); padding: 10px 14px; }
 .message-text.needs-attention { border-left: 3px solid #ba8b32; border-radius: 0 8px 8px 0; background: #fff9eb; padding: 10px 14px; }
+.answer-claim + .answer-claim, .answer-claim + .message-text { margin-top: 14px; }
 .answer-sources { list-style: none; display: flex; flex-wrap: wrap; gap: 7px; margin: 10px 0 0; padding: 0; }
 .answer-sources li { min-width: 0; }
 .answer-source {

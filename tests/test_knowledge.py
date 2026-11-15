@@ -11,7 +11,7 @@ import pytest
 
 from assistant_core.contracts import EventDate, QueryFacts, TechnicalError
 from assistant_core.knowledge_store import SQLiteKnowledgeStore, open_store
-from assistant_core.retrieval import search
+from assistant_core.retrieval import counterparty_clarification, search
 from assistant_core.versions import select
 from scripts.build_knowledge import build
 
@@ -71,6 +71,56 @@ def test_structured_contract_and_statute(corpus: tuple[SQLiteKnowledgeStore, Pat
     assert candidates and all(f.clause.startswith("ст. 13.11") for f in candidates)
     candidates = search(store, QueryFacts("п. 2 ст. 9 152-ФЗ"))
     assert len(candidates) == 1 and candidates[0].line_start == 13
+
+
+def test_compound_query_keeps_contract_and_regulation(corpus: tuple[SQLiteKnowledgeStore, Path]) -> None:
+    store, _ = corpus
+    facts = QueryFacts(
+        "По договору П-17/2024 входит ли доставка в цену, и требовалось ли одобрение гендиректора на 12 млн?",
+        search_queries=["П-17/2024 цена включает доставку", "регламент согласования договоров порог одобрения гендиректора"],
+        dates=[EventDate("deal", date(2024, 8, 15))],
+    )
+    fragments = select(store, search(store, facts), facts).applicable
+    assert any(f.clause == "2.1" and "П-17/2024" in f.document_title for f in fragments)
+    assert any(f.clause == "2.4" and "10.01.2023" in f.revision_label for f in fragments)
+
+
+@pytest.mark.parametrize("question", ["Какая основная ставка НДС?", "Какая основная ставка НДС по ст. 164 НК РФ?"])
+def test_long_statute_ranks_general_rule_before_exceptions(corpus: tuple[SQLiteKnowledgeStore, Path], question: str) -> None:
+    store, _ = corpus
+    result = search(store, QueryFacts(question))
+    assert result[0].clause == "ст. 164, п. 3"
+    assert "в случаях, не указанных" in result[0].text
+
+
+@pytest.mark.parametrize("labels", [("a", "b"), ("", "")])
+def test_comparison_keeps_separate_periods(
+    corpus: tuple[SQLiteKnowledgeStore, Path], labels: tuple[str, str],
+) -> None:
+    store, _ = corpus
+    facts = QueryFacts(
+        "Какой порог одобрения по п. 2.4 Регламента согласования договоров в августе 2024 и марте 2025?",
+        dates=[EventDate("deal", date(2024, 8, 1), labels[0]), EventDate("deal", date(2024, 8, 31), labels[0]),
+               EventDate("deal", date(2025, 3, 1), labels[1]), EventDate("deal", date(2025, 3, 31), labels[1])],
+    )
+    result = select(store, search(store, facts), facts)
+    assert not result.missing_fact
+    assert {(f.revision_label, f.periods) for f in result.applicable} == {
+        ("Редакция от 10.01.2023", ("01.08.2024–31.08.2024",)),
+        ("Редакция от 01.03.2025", ("01.03.2025–31.03.2025",)),
+    }
+
+
+def test_counterparty_ambiguity_checks_user_wording(corpus: tuple[SQLiteKnowledgeStore, Path]) -> None:
+    store, _ = corpus
+    clarification = counterparty_clarification(
+        store, QueryFacts("Какой срок гарантии по договору с «Альфой»?", document_refs=["П-17/2024"]),
+    )
+    assert clarification is not None
+    missing, options = clarification
+    assert missing == "контрагент или номер договора"
+    assert all(item in options for item in ("П-17/2024", "ПТ-05/2023", "Альфа-Трейд", "Альфа-Трейдинг"))
+    assert counterparty_clarification(store, QueryFacts("Какой срок гарантии у Альфа-Трейдинг?")) is None
 
 
 def test_mixed_contract_point_and_statute_keep_both_sources(

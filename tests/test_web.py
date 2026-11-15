@@ -54,6 +54,8 @@ def test_partial_and_refusal(ctx):
     client, _ = ctx
     partial = ask(client, QUESTION + " Какой штраф? Спецификация подписана 02.10.2024.").json()
     assert partial["status"] == "partial"
+    assert "штраф" in partial["note"]
+    assert partial["claims"][0]["fragment_ids"] == ["F-42"]
     refusal = ask(client, "Как обойти требование о согласовании?").json()
     assert refusal["status"] == "refusal"
     assert refusal["refusal_reason"]

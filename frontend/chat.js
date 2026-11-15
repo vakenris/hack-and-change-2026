@@ -72,7 +72,25 @@ function sourceLabel(source) {
   const clause = source.clause
     ? (/^\d/.test(source.clause) ? `п. ${source.clause}` : source.clause)
     : "";
-  return [source.document_title || "Источник", clause].filter(Boolean).join(", ");
+  return [source.document_title || "Источник", clause, source.revision_label].filter(Boolean).join(", ");
+}
+
+function appendSources(container, sources) {
+  const list = create("ul", "answer-sources");
+  list.setAttribute("aria-label", "Источники вывода");
+  for (const source of sources) {
+    if (!source || !safeId.test(source.fragment_id || "")) continue;
+    const entry = create("li");
+    const button = create("button", "answer-source", sourceLabel(source));
+    button.type = "button";
+    button.dataset.fragmentId = source.fragment_id;
+    button.setAttribute("aria-controls", "sources-panel");
+    button.setAttribute("aria-expanded", "false");
+    button.addEventListener("click", () => openSource(source.fragment_id, button));
+    entry.append(button);
+    list.append(entry);
+  }
+  if (list.childElementCount) container.append(list);
 }
 
 function renderTurn(turn) {
@@ -84,24 +102,24 @@ function renderTurn(turn) {
     text.classList.add("needs-attention");
     text.append(create("span", "visually-hidden", `${labels[turn.status]}. `));
   }
-  text.append(turn.content);
-  item.append(text);
-  if (Array.isArray(turn.sources) && turn.sources.length) {
-    const list = create("ul", "answer-sources");
-    list.setAttribute("aria-label", "Источники ответа");
-    for (const source of turn.sources) {
-      if (!source || !safeId.test(source.fragment_id || "")) continue;
-      const entry = create("li");
-      const button = create("button", "answer-source", sourceLabel(source));
-      button.type = "button";
-      button.dataset.fragmentId = source.fragment_id;
-      button.setAttribute("aria-controls", "sources-panel");
-      button.setAttribute("aria-expanded", "false");
-      button.addEventListener("click", () => openSource(source.fragment_id, button));
-      entry.append(button);
-      list.append(entry);
+  const claims = turn.role === "assistant" && Array.isArray(turn.claims) ? turn.claims : [];
+  const sources = Array.isArray(turn.sources) ? turn.sources : [];
+  if (claims.length && claims.every((claim) => typeof claim?.text === "string" && Array.isArray(claim.fragment_ids))) {
+    const byFragment = new Map(sources.filter(Boolean).map((source) => [source.fragment_id, source]));
+    text.classList.remove("needs-attention");
+    text.classList.add("visually-hidden");
+    item.append(text);
+    for (const claim of claims) {
+      const block = create("div", "answer-claim");
+      block.append(create("p", "message-text", claim.text));
+      appendSources(block, claim.fragment_ids.map((id) => byFragment.get(id)));
+      item.append(block);
     }
-    if (list.childElementCount) item.append(list);
+    if (turn.note) item.append(create("p", "message-text needs-attention", turn.note));
+  } else {
+    text.append(turn.content);
+    item.append(text);
+    appendSources(item, sources);
   }
   return item;
 }
@@ -184,6 +202,8 @@ async function sendQuestion(retry = false) {
       content: answer.text,
       status: answer.status,
       sources: answer.sources,
+      claims: answer.claims,
+      note: answer.note,
     });
   } catch (error) {
     if (controller.signal.aborted) return;

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 from datetime import date
+import re
 from sqlite3 import Row
 
 from .contracts import Fragment, QueryFacts, Selection
-from .knowledge_store import FRAGMENT_COLUMNS, SQLiteKnowledgeStore
+from .knowledge_store import FRAGMENT_COLUMNS, SQLiteKnowledgeStore, normalize
 from .retrieval import clause_numbers
 
 FACT_NAMES = {
@@ -14,6 +16,9 @@ FACT_NAMES = {
     "deal": "дата заключения договора",
     "as_of": "дата, на которую нужно проверить редакцию",
 }
+MONTH_ROOTS = "январ феврал март апрел ма июн июл август сентябр октябр ноябр декабр".split()
+MONTH_NAME = rf"({'|'.join(MONTH_ROOTS)})[а-я]{{0,3}}\s+(\d{{4}})"
+MONTH_COMPARISON = re.compile(rf"\b{MONTH_NAME}(?:\s+года?)?\s+и\s+(?:в\s+)?{MONTH_NAME}\b")
 
 
 def active(row: Row, when: str) -> bool:
@@ -55,6 +60,49 @@ def dates_to_check(dates: set[str], versions: list[Row], rows: list[Row]) -> lis
 
 
 def select(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts: QueryFacts) -> Selection:
+    groups = defaultdict(list)
+    for event in facts.dates:
+        groups[event.period].append(event)
+    # A coordinated pair of named months is a comparison even when
+    # extraction recognises the dates but omits their optional labels.
+    if set(groups) == {""}:
+        match = MONTH_COMPARISON.search(normalize(facts.question))
+        if match:
+            first, first_year, second, second_year = match.groups()
+            months = {(int(first_year), MONTH_ROOTS.index(first) + 1),
+                      (int(second_year), MONTH_ROOTS.index(second) + 1)}
+            dates = groups.pop("")
+            for event in dates:
+                month = (event.value.year, event.value.month)
+                period = event.value.strftime("%Y-%m") if month in months and event.event_type in (
+                    "as_of", "deal", "unknown"
+                ) else ""
+                groups[period].append(event)
+    if len(groups.keys() - {""}) < 2:
+        return select_period(store, candidates, facts)
+
+    result = Selection()
+    applicable: dict[str, Fragment] = {}
+    missing = set()
+    for period, dates in groups.items():
+        if not period:
+            continue
+        start = min(event.value for event in dates)
+        end = max(event.value for event in dates)
+        label = f"{start:%d.%m.%Y}" if start == end else f"{start:%d.%m.%Y}–{end:%d.%m.%Y}"
+        selected = select_period(store, candidates, replace(facts, dates=[*dates, *groups.get("", [])]))
+        for fragment in selected.applicable:
+            existing = applicable.get(fragment.fragment_id, fragment)
+            applicable[fragment.fragment_id] = replace(existing, periods=(*existing.periods, label))
+        result.gaps.extend(f"Период {label}. {gap}" for gap in dict.fromkeys(selected.gaps))
+        if selected.missing_fact:
+            missing.add(selected.missing_fact)
+    result.applicable = list(applicable.values())
+    result.missing_fact = ", ".join(sorted(missing)) or None
+    return result
+
+
+def select_period(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts: QueryFacts) -> Selection:
     result = Selection()
     if not candidates:
         return result
@@ -142,7 +190,9 @@ def select(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts: Query
                     at = f" на {first:%d.%m.%Y}" if first == last else f" за период {first:%d.%m.%Y}–{last:%d.%m.%Y}"
                 result.gaps.append(f"В базе нет применимой редакции{at} ({label}).")
             continue
-        result.applicable.append(Fragment(**{key: chosen[key] for key in Fragment.__dataclass_fields__}))
+        result.applicable.append(Fragment(**{
+            key: chosen[key] for key in Fragment.__dataclass_fields__ if key != "periods"
+        }))
 
     if required_facts:
         result.missing_fact = ", ".join(sorted(required_facts))

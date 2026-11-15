@@ -18,7 +18,15 @@ def decide(
     facts: QueryFacts, selection: Selection, draft: Draft, verified: list[Claim]
 ) -> Decision:
     missing_fact = selection.missing_fact
-    gaps = [gap.strip() for gap in selection.gaps if gap.strip()]
+    gaps = list(dict.fromkeys(gap.strip() for gap in selection.gaps if gap.strip()))
+    # Only echo parts of the user's question. A generated explanation of
+    # a gap is not itself a verified legal statement.
+    uncovered_parts = [
+        part.strip() for part in draft.unanswered[:4]
+        if 0 < len(part.strip()) <= 180 and part.strip() in facts.question
+    ]
+    gaps.extend(f"В базе не найдено достаточных оснований для части вопроса «{part}»"
+                for part in dict.fromkeys(uncovered_parts))
     gap_text = " ".join(gap if gap.endswith((".", "?", "!")) else f"{gap}." for gap in gaps)
     question = f"Пожалуйста, укажите недостающие сведения ({missing_fact})." if missing_fact else ""
 
@@ -28,8 +36,8 @@ def decide(
         if missing_fact or gap_text or uncovered:
             if uncovered and not (gap_text or missing_fact):
                 gap_text = "Для остальных частей вопроса подтверждённых оснований недостаточно."
-            text = "\n".join(part for part in (text, gap_text, question) if part)
-            return Decision(STATUS_PARTIAL, text, missing_fact=missing_fact)
+            note = "\n".join(part for part in (gap_text, question) if part)
+            return Decision(STATUS_PARTIAL, f"{text}\n{note}", missing_fact=missing_fact, note=note)
         return Decision(STATUS_FULL, text)
 
     if missing_fact:

@@ -25,6 +25,7 @@ def answer_to_json(answer: Answer) -> dict:
     return {
         "status": answer.status,
         "text": answer.text,
+        "note": answer.note,
         "claims": [asdict(claim) for claim in answer.claims],
         "sources": [card_to_json(card) for card in answer.sources],
         "missing_fact": answer.missing_fact,

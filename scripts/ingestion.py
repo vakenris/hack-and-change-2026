@@ -99,6 +99,10 @@ def parse_law(path: Path, text: str, lines: list[str], export: re.Match[str]) ->
     provision_from = None
     pending_from = None
     notes = False
+    section_heading = ""
+    article_heading = lines[start]
+    if code == "НК" and article == "164":
+        article_heading += " НДС налог на добавленную стоимость"
     single_line = not any(line.strip() for line in lines[start + 1:])
     for i, line in enumerate(lines[start:], start + 1):
         if not line.strip():
@@ -113,19 +117,25 @@ def parse_law(path: Path, text: str, lines: list[str], export: re.Match[str]) ->
             provision = ""
             provision_from = pending_from
             pending_from = None
+            section_heading = line
             continue
         match = PROVISION.match(line)
         if match and line[match.end() - 2] == ".":
             provision = match[1]
             if not notes:
                 provision_from = pending_from
+                section_heading = line[:220] if line.rstrip().endswith(":") else ""
         effective = max(filter(None, (article_from, provision_from, pending_from)), default=None)
         clause = f"ст. {article}"
         if provision:
             clause += f", примечание {provision}" if notes else f", п. {provision}"
         # A heading without article text is context, not a quotable provision.
         if i != start + 1 or single_line or code == "МРОТ":
-            passages.append(Passage(clause, i, i, effective_from=effective))
+            context = " ".join((article_heading, section_heading))
+            body = normalize(line)
+            if "налоговой ставке" in body and "в случаях, не указанных" in body:
+                context += " основная ставка общая ставка стандартная ставка"
+            passages.append(Passage(clause, i, i, context, effective_from=effective))
         pending_from = None
     code_key = normalize(code)
     return Document(path.stem, f"{code} — {lines[start]}", f"Выгрузка от {snapshot:%d.%m.%Y}", text,

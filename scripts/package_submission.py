@@ -19,6 +19,7 @@ CORE_MODULES = [
     "llm_client.py",
     "llm_prompts.py",
     "answer_policy.py",
+    "runtime.py",
 ]
 PACKAGE_ENTRY = '''"""Expose the flat submission modules as the assistant_core package."""
 from pathlib import Path
