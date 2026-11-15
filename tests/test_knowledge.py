@@ -88,6 +88,50 @@ def test_regulation_boundary(
     assert threshold in selected.applicable[0].text
 
 
+def test_explicit_revision_date_takes_precedence_over_deal_date(
+    corpus: tuple[SQLiteKnowledgeStore, Path],
+) -> None:
+    store, _ = corpus
+    query = QueryFacts(
+        "Регламент согласования договоров, п. 2.4: какая редакция действовала на 28.02.2025?",
+        dates=[EventDate("deal", date(2025, 3, 1)), EventDate("as_of", date(2025, 2, 28))],
+    )
+    selected = select(store, search(store, query), query)
+    assert not selected.gaps
+    assert [fragment.revision_label for fragment in selected.applicable] == ["Редакция от 10.01.2023"]
+
+
+def test_regulation_selects_same_edition_for_whole_month(
+    corpus: tuple[SQLiteKnowledgeStore, Path],
+) -> None:
+    store, _ = corpus
+    query = QueryFacts(
+        "Договор на 12 млн рублей заключали в августе 2024 года. Нужно ли было одобрение генерального директора?",
+        search_queries=["одобрение договора генеральным директором"],
+        document_refs=["регламент согласования договоров"],
+        dates=[EventDate("deal", date(2024, 8, 1)), EventDate("deal", date(2024, 8, 31))],
+    )
+    selected = select(store, search(store, query), query)
+    assert not selected.gaps
+    assert selected.applicable
+    assert {fragment.revision_label for fragment in selected.applicable} == {"Редакция от 10.01.2023"}
+    assert any(fragment.clause == "2.4" and "10 000 000" in fragment.text for fragment in selected.applicable)
+
+
+def test_specification_month_crossing_amendment_requires_exact_date(
+    corpus: tuple[SQLiteKnowledgeStore, Path],
+) -> None:
+    store, _ = corpus
+    query = QueryFacts(
+        "П-17/2024, п. 3.2, спецификация подписана в октябре 2024 года",
+        dates=[EventDate("spec_signed", date(2024, 10, 1)), EventDate("spec_signed", date(2024, 10, 31))],
+    )
+    selected = select(store, search(store, query), query)
+    assert not selected.applicable
+    assert selected.missing_fact == "дата подписания спецификации"
+    assert "разные положения" in selected.gaps[0]
+
+
 @pytest.mark.parametrize(("when", "revision", "start"), [
     (date(2024, 9, 30), "Исходная редакция", 14),
     (date(2024, 10, 1), "Исходная редакция", 14),
@@ -155,10 +199,20 @@ def test_organizer_questions_with_search_queries(
 ])
 def test_unavailable_history(corpus: tuple[SQLiteKnowledgeStore, Path], question: str, when: date) -> None:
     store, _ = corpus
-    query = QueryFacts(question, dates=[EventDate("deal", when)])
+    query = QueryFacts(question, dates=[EventDate("as_of", when)])
     selected = select(store, search(store, query), query)
     assert not selected.applicable and selected.missing_fact is None
     assert selected.gaps and "В базе нет применимой редакции" in selected.gaps[0]
+
+
+def test_unclassified_date_does_not_select_current_law(
+    corpus: tuple[SQLiteKnowledgeStore, Path],
+) -> None:
+    store, _ = corpus
+    query = QueryFacts("ТК РФ, ст. 70", dates=[EventDate("unknown", date(2025, 8, 31))])
+    selected = select(store, search(store, query), query)
+    assert not selected.applicable
+    assert selected.missing_fact == "дата события, к которому относится вопрос"
 
 
 def test_incomplete_build_keeps_previous_catalogue(tmp_path: Path) -> None:

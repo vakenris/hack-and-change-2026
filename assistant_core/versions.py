@@ -7,8 +7,13 @@ from sqlite3 import Row
 
 from .contracts import Fragment, QueryFacts, Selection
 from .knowledge_store import FRAGMENT_COLUMNS, SQLiteKnowledgeStore
+from .retrieval import clause_numbers
 
-FACT_NAMES = {"spec_signed": "дата подписания спецификации", "deal": "дата заключения договора"}
+FACT_NAMES = {
+    "spec_signed": "дата подписания спецификации",
+    "deal": "дата заключения договора",
+    "as_of": "дата, на которую нужно проверить редакцию",
+}
 
 
 def active(row: Row, when: str) -> bool:
@@ -20,6 +25,33 @@ def active(row: Row, when: str) -> bool:
 def choose_revision(documents: list[Row], when: str) -> Row | None:
     return max((row for row in documents if active(row, when)),
                key=lambda row: row["valid_from"] or "", default=None)
+
+
+def fragment_at(
+    versions: list[Row], rows: list[Row], amendments: list[Row], when: str | None,
+) -> tuple[Row | None, Row | None]:
+    revision = choose_revision(versions, when) if when else max(
+        versions, key=lambda row: row["valid_from"] or "", default=None
+    )
+    chosen = next((row for row in rows if revision and row["document_id"] == revision["document_id"]), None)
+    if when:
+        chosen = next((row for row in amendments if row["application_from"] <= when
+                       and row["effective_from"] <= when), chosen)
+        if chosen is not None and chosen["effective_from"] and chosen["effective_from"] > when:
+            chosen = None
+    return revision, chosen
+
+
+def dates_to_check(dates: set[str], versions: list[Row], rows: list[Row]) -> list[str | None]:
+    if not dates:
+        return [None]
+    start, end = min(dates), max(dates)
+    # Month bounds and ambiguous dates can enclose a change of wording.
+    boundaries = {
+        *(row[key] for row in versions for key in ("valid_from", "valid_to")),
+        *(row[key] for row in rows for key in ("effective_from", "application_from")),
+    }
+    return sorted(dates | {day for day in boundaries if day and start < day < end})
 
 
 def select(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts: QueryFacts) -> Selection:
@@ -42,6 +74,7 @@ def select(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts: Query
     families = sorted({row["family_id"] for row in seeds.values()})
     if not families:
         return result
+    explicit_clauses = clause_numbers(facts)
     placeholders = ",".join("?" for _ in families)
     documents: dict[str, list[Row]] = defaultdict(list)
     for row in store.read(f"SELECT * FROM documents WHERE family_id IN ({placeholders})", families):
@@ -69,6 +102,8 @@ def select(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts: Query
         """, (family, slot))
         amendments = [row for row in rows if row["kind"] == "amendment"]
         event_type = amendments[0]["event_type"] if amendments else versions_event
+        if not amendments and dates.get("as_of"):
+            event_type = "as_of"
         if event_type:
             relevant_dates = dates.get(event_type, set())
         else:
@@ -76,23 +111,29 @@ def select(store: SQLiteKnowledgeStore, candidates: list[Fragment], facts: Query
             relevant_dates = set().union(*(values for kind, values in dates.items() if kind != "unknown"))
         label = f"{candidate.document_title}, {candidate.clause}"
         fact = FACT_NAMES.get(event_type, "дата события, к которому относится вопрос")
-        if len(relevant_dates) > 1 or (not relevant_dates and (amendments or versions_event == "deal" and dates)):
+        is_law = any(row["kind"] == "law" for row in versions)
+        if not relevant_dates and (amendments or versions_event == "deal" and dates
+                                   or is_law and dates.get("unknown")):
             required_facts.add(fact)
             result.gaps.append(f"Для выбора применимой редакции ({label}) нужна {fact}.")
             continue
 
-        when = next(iter(relevant_dates), None)
-        # For an undated question use the latest supplied wording; the corpus has its own cutoff.
-        revision = choose_revision(versions, when) if when else max(
-            versions, key=lambda row: row["valid_from"] or "", default=None
-        )
-        chosen = next((row for row in rows if revision and row["document_id"] == revision["document_id"]), None)
-        if when and amendments:
-            chosen = next((row for row in amendments if row["application_from"] <= when
-                           and row["effective_from"] <= when), chosen)
-        if chosen is None or when and chosen["effective_from"] and chosen["effective_from"] > when:
-            if revision is None or revision["kind"] == "law" or when and revision["valid_to"] is not None:
-                at = f" на {date.fromisoformat(when):%d.%m.%Y}" if when else ""
+        checks = dates_to_check(relevant_dates, versions, rows)
+        selections = [fragment_at(versions, rows, amendments, when) for when in checks]
+        fragment_ids = {row["fragment_id"] if row is not None else None for _, row in selections}
+        if len(fragment_ids) > 1:
+            required_facts.add(fact)
+            result.gaps.append(f"В указанные даты применяются разные положения ({label}). Нужна точная {fact}.")
+            continue
+        revision, chosen = selections[0]
+        if chosen is None:
+            # A provision from another edition may be only an incidental search match.
+            if revision is None or is_law or candidate.clause in explicit_clauses:
+                start, end = checks[0], checks[-1]
+                at = ""
+                if start and end:
+                    first, last = date.fromisoformat(start), date.fromisoformat(end)
+                    at = f" на {first:%d.%m.%Y}" if first == last else f" за период {first:%d.%m.%Y}–{last:%d.%m.%Y}"
                 result.gaps.append(f"В базе нет применимой редакции{at} ({label}).")
             continue
         result.applicable.append(Fragment(**{key: chosen[key] for key in Fragment.__dataclass_fields__}))

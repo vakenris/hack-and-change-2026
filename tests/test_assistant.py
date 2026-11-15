@@ -116,6 +116,13 @@ class TestAssistantML:
         assert answer.sources == []
         assert self.responses == []
 
+    def test_extract_facts_uses_month_bounds_including_leap_day(self) -> None:
+        self.responses = [
+            {**self.facts_response, "dates": [{"event_type": "as_of", "value": "2024-02"}]},
+        ]
+        facts = llm_client.extract_facts([Message("user", "Что предусматривала редакция в феврале 2024 года?")])
+        assert facts.dates == [EventDate("as_of", date(2024, 2, 1)), EventDate("as_of", date(2024, 2, 29))]
+
     def test_partial_keeps_supported_correction_with_catalog_source(self) -> None:
         self.selection = Selection(applicable=[self.fragment])
         self.messages.append(Message(

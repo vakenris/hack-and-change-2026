@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+from calendar import monthrange
 from dataclasses import asdict
 from datetime import date
 
@@ -107,13 +108,20 @@ def extract_facts(messages: list[Message]) -> QueryFacts:
         event_type = _string(item.get("event_type"), "event_type")
         value = _string(item.get("value"), "value")
         try:
-            if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            if re.fullmatch(r"[0-9]{4}-[0-9]{2}", value):
+                first = date.fromisoformat(value + "-01")
+                last = first.replace(day=monthrange(first.year, first.month)[1])
+                bounds = (first, last)
+            elif re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+                bounds = (date.fromisoformat(value),)
+            else:
                 raise ValueError("date format")
-            event = EventDate(event_type, date.fromisoformat(value))
         except ValueError:
             raise TechnicalError("Модель вернула некорректную дату события") from None
-        if event not in dates:
-            dates.append(event)
+        for bound in bounds:
+            event = EventDate(event_type, bound)
+            if event not in dates:
+                dates.append(event)
     return QueryFacts(
         question=question,
         search_queries=_strings(result, "search_queries") or [question],
