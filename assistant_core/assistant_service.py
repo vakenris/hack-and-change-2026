@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Optional
 
 from . import citations
-from .retrieval import clause_numbers
 from .runtime import stage
 from .contracts import (
     STATUS_CLARIFY,
@@ -18,9 +17,7 @@ from .contracts import (
     Answer,
     Deps,
     Draft,
-    Fragment,
     Message,
-    QueryFacts,
     TechnicalError,
 )
 
@@ -58,24 +55,18 @@ class Assistant:
             facts = deps.extract_facts(messages)
         with stage("search"):
             clarification = deps.clarify(facts) if deps.clarify else None
-            if clarification and not facts.unlawful_request:
+            if clarification:
                 missing, options = clarification
                 return Answer(
                     STATUS_CLARIFY, f"Под описание подходят {options}. Укажите контрагента или номер договора.",
                     missing_fact=missing,
                 )
-            limit = self.search_limit * 3 if deps.rerank else self.search_limit
-            candidates = deps.search(facts, limit)
+            candidates = deps.search(facts, self.search_limit)
         with stage("versions"):
-            selection = deps.select(candidates[:self.search_limit], facts)
-        if deps.rerank and candidates:
+            selection = deps.select(candidates, facts)
+        if deps.rerank and len(selection.applicable) > 1:
             with stage("rerank"):
-                pool = (deps.select(candidates, facts).applicable
-                        if len(candidates) > self.search_limit else selection.applicable)
-                if len(pool) > 1:
-                    ranked = deps.rerank(facts.question, pool)
-                    if ranked is not pool:
-                        selection.applicable = limit_reranked(ranked, selection.applicable, facts, self.search_limit)
+                selection.applicable = deps.rerank(facts.question, selection.applicable)
         passed = {fragment.fragment_id: fragment for fragment in selection.applicable}
 
         draft = Draft()
@@ -117,25 +108,6 @@ class Assistant:
 
 def default_db_path() -> str:
     return os.environ.get("KNOWLEDGE_DB") or str(ROOT / "data" / "processed" / "knowledge.sqlite")
-
-
-def limit_reranked(
-    ranked: list[Fragment], original: list[Fragment], facts: QueryFacts, limit: int,
-) -> list[Fragment]:
-    requested = clause_numbers(facts)
-    pinned = [item for item in original
-              if item.clause in requested or item.clause.rsplit(", п. ", 1)[-1] in requested]
-    periods = set()
-    for item in original:
-        if set(item.periods) - periods:
-            pinned.append(item)
-            periods.update(item.periods)
-    selected = dict(list({item.fragment_id: item for item in pinned}.items())[:limit])
-    for item in ranked:
-        if len(selected) >= limit:
-            break
-        selected.setdefault(item.fragment_id, item)
-    return list(selected.values())
 
 
 def build_assistant(db_path: Optional[str] = None) -> Assistant:

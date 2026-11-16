@@ -28,15 +28,12 @@ QUERY_EXPANSIONS = (
     (re.compile(r"\bпропуск\w*\b"), "доступ"),
 )
 DEFAULT_RATE = re.compile(r"\b(?:основн\w*|общ\w*|стандартн\w*)\s+(?:налогов\w*\s+)?ставк\w*")
-DELIVERY_LOCATION = re.compile(
-    r"\b(?:адрес\w*|куда|мест[ое]\s+(?:поставки|доставки)|порядок\s+поставки|"
-    r"где\s+(?:наход\w*\s+)?(?:склад\w*|разгруж\w*|выгруж\w*|достав\w*)|"
-    r"на\s+как\w*\s+склад\w*|како\w*\s+склад\w*)\b"
-)
-SPECIFICATION_SLOT = (
-    "EXISTS (SELECT 1 FROM documents a JOIN fragments af USING (document_id) "
-    "WHERE a.kind = 'amendment' AND a.event_type = 'spec_signed' "
-    "AND a.family_id = d.family_id AND af.slot = f.slot)"
+IT_ORGANIZATION = re.compile(r"\b(?:it|ит|айти)\s+(?:компани|организаци|фирм|отрасл)\w*\b")
+LAW_POINT = re.compile(r"ст\. \d+(?:[.\-]\d+)*, п\. (\d+(?:\.\d+)*(?:-\d+)?)$")
+LAW_LIST_ITEM = re.compile(r"^(?:\d+(?:[.\-]\d+)*\)\s+)?[а-яё]")
+DEFAULT_RATE_RANK = (
+    "(instr(fragment_fts.context, 'основная ставка') > 0 OR "
+    "fragment_fts.body LIKE '1 налоговая ставка устанавливается в размере %если иное не установлено настоящей статьей%') DESC, "
 )
 QUESTION_BOUNDARY = re.compile(
     r"(?<=[?;])\s+|,?\s+(?:и|а также)\s+(?=(?:как\w*|сколько|когда|нужн\w*|требу\w*|"
@@ -63,18 +60,15 @@ def match_expression(text: str) -> str:
     expressions = []
     if DEFAULT_RATE.search(text):
         expressions.append('"основная ставка"')
+    if IT_ORGANIZATION.search(text):
+        expressions.append('"информационных технологий"')
     for term in list(terms)[:48]:
         expressions.append(f'"{term}"')
-        if term in {"акт", "срок", "склад"}:
-            expressions.append(f'"{term}"*')
-        elif len(term) >= 6 and term.isalpha():
+        if len(term) >= 6 and term.isalpha():
             expressions.append(f'"{term[:max(5, len(term) - 3)]}"*')
+        elif term in {"акт", "срок"}:
+            expressions.append(f'"{term}"*')
     return " OR ".join(dict.fromkeys(expressions))
-
-
-def seeks_delivery_location(facts: QueryFacts) -> bool:
-    text = search_text(" ".join((facts.question, *facts.search_queries)))
-    return bool(DELIVERY_LOCATION.search(text))
 
 
 def ranked_fragments(
@@ -93,11 +87,18 @@ def ranked_fragments(
             f"AND substr(f.clause, instr(f.clause, ', п. ') + 5) IN ({placeholders})))"
         )
         parameters.extend(sorted(clauses) * 2)
+    else:
+        query_text = search_text(" ".join((facts.question, *facts.search_queries)))
+        asks_address = any(phrase in query_text for phrase in ("адрес", "куда", "место поставки",
+                                                              "место доставки", "порядок поставки"))
+        if not asks_address and not any(event.event_type == "spec_signed" for event in facts.dates):
+            conditions.append("NOT EXISTS (SELECT 1 FROM documents a JOIN fragments af USING (document_id) "
+                              "WHERE a.kind = 'amendment' AND a.event_type = 'spec_signed' "
+                              "AND a.family_id = d.family_id AND af.slot = f.slot)")
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
     select = f"SELECT {FRAGMENT_COLUMNS} FROM fragments f JOIN documents d USING (document_id)"
-    asks_address = seeks_delivery_location(facts)
-    query = match_expression(f"{text} адрес доставка склад" if asks_address else text)
-    location_rank = f"{SPECIFICATION_SLOT} DESC, " if asks_address else ""
+    normalized = search_text(text)
+    query = match_expression(text)
     if not query and families is None and not clauses:
         return []
     if clauses or not query:
@@ -107,15 +108,46 @@ def ranked_fragments(
         rows = store.read(
             select + " JOIN fragment_fts ON fragment_fts.rowid = f.rowid" + where + operator
             + "fragment_fts MATCH ? ORDER BY "
-            + location_rank
-            + ("(instr(fragment_fts.context, 'основная ставка') > 0) DESC, "
-               if DEFAULT_RATE.search(search_text(text)) else "")
+            + (DEFAULT_RATE_RANK if DEFAULT_RATE.search(normalized) else "")
+            + ("(instr(fragment_fts.body, 'информационных технологий') > 0) DESC, "
+               if IT_ORGANIZATION.search(normalized) else "")
             + "bm25(fragment_fts, 1.0, 0.3), f.source_path, f.line_start LIMIT ?",
             (*parameters, query, limit),
         )
         if not rows and families is not None:
             rows = store.read(select + where + " ORDER BY f.source_path, f.line_start LIMIT ?", (*parameters, limit))
-    return [Fragment(**dict(row)) for row in rows]
+    return with_law_openers(store, [Fragment(**dict(row)) for row in rows], limit)
+
+
+def with_law_openers(
+    store: SQLiteKnowledgeStore, ranked: list[Fragment], limit: int,
+) -> list[Fragment]:
+    """Include the rule introducing a retrieved legal list item."""
+    if limit < 2:
+        return ranked
+    result: dict[str, Fragment] = {}
+    checked: set[tuple[str, str]] = set()
+    for index, item in enumerate(ranked):
+        result.setdefault(item.fragment_id, item)
+        if len(result) == limit:
+            break
+        point = LAW_POINT.fullmatch(item.clause) if index < 3 else None
+        key = (item.document_id, item.clause)
+        if not point or key in checked or not LAW_LIST_ITEM.match(item.text):
+            continue
+        checked.add(key)
+        rows = store.read(
+            f"SELECT {FRAGMENT_COLUMNS} FROM fragments f "
+            "WHERE f.document_id = ? AND f.clause = ? AND f.line_start < ? AND f.text LIKE ? "
+            "ORDER BY f.line_start LIMIT 1",
+            (*key, item.line_start, f"{point[1]}. %"),
+        )
+        if rows:
+            opener = Fragment(**dict(rows[0]))
+            result.setdefault(opener.fragment_id, opener)
+            if len(result) == limit:
+                break
+    return list(result.values())
 
 
 def catalogue_refs(store: SQLiteKnowledgeStore) -> dict[str, dict[str, set[str]]]:

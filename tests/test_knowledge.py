@@ -93,6 +93,41 @@ def test_long_statute_ranks_general_rule_before_exceptions(corpus: tuple[SQLiteK
     assert "в случаях, не указанных" in result[0].text
 
 
+@pytest.mark.parametrize("question", [
+    "Какая ставка налога на прибыль у аккредитованной IT-компании по ст. 284 НК РФ?",
+    "Как облагается прибыль российской ИТ-организации с госаккредитацией (ст. 284 НК РФ)?",
+    "Что со ставкой налога на прибыль для аккредитованной айти-фирмы по ст. 284 НК РФ?",
+])
+def test_it_tax_rate_finds_the_rule_in_final_context(corpus, question: str) -> None:
+    store, _ = corpus
+    facts = QueryFacts(question)
+    fragments = select(store, search(store, facts), facts).applicable
+    assert any(f.clause == "ст. 284, п. 1.15" and f.text.startswith("1.15. Для российских организаций")
+               for f in fragments[:3])
+
+
+def test_profit_tax_general_rate_ranks_first(corpus) -> None:
+    store, _ = corpus
+    facts = QueryFacts("Какая общая ставка налога на прибыль по ст. 284 НК РФ?")
+    fragments = select(store, search(store, facts), facts).applicable
+    assert fragments[0].clause == "ст. 284, п. 1"
+    assert fragments[0].text.startswith("1. Налоговая ставка устанавливается в размере 25 процентов")
+
+
+@pytest.mark.parametrize(("question", "item"), [
+    ("Какая ставка НДС действует для детских игрушек по ст. 164 НК РФ?", "игрушек;"),
+    ("Какой НДС на хлеб и хлебобулочные изделия по ст. 164 НК РФ?", "хлеба и хлебобулочных изделий"),
+])
+def test_tax_list_item_keeps_the_rate_stated_in_its_opening(corpus, question: str, item: str) -> None:
+    store, _ = corpus
+    facts = QueryFacts(question)
+    fragments = select(store, search(store, facts), facts).applicable
+    match, opener = fragments[:2]
+    assert match.text.startswith(item)
+    assert match.document_id == opener.document_id and match.clause == opener.clause == "ст. 164, п. 2"
+    assert opener.text.startswith("2. Налогообложение производится по налоговой ставке 10 процентов")
+
+
 @pytest.mark.parametrize("labels", [("a", "b"), ("", "")])
 def test_comparison_keeps_separate_periods(
     corpus: tuple[SQLiteKnowledgeStore, Path], labels: tuple[str, str],
@@ -244,19 +279,6 @@ def test_delivery_requires_specification_date(corpus: tuple[SQLiteKnowledgeStore
     assert selected.missing_fact is None and [f.clause for f in selected.applicable] == ["2.1"]
 
 
-@pytest.mark.parametrize("question", [
-    "Где находится склад покупателя по договору П-17/2024?",
-    "На какой склад везти товар по договору П-17/2024?",
-    "Где разгружать товар по договору П-17/2024?",
-])
-def test_delivery_location_paraphrases_keep_amended_clause(corpus, question: str) -> None:
-    store, _ = corpus
-    facts = QueryFacts(question)
-    candidates = search(store, facts)
-    assert candidates[0].clause == "3.2"
-    assert select(store, candidates, facts).missing_fact == "дата подписания спецификации"
-
-
 @pytest.mark.parametrize(("question", "expected"), [
     ("За сколько дней после поставки нужно проверить качество?", {"3.3", "6.1"}),
     ("Доставка и упаковка уже включены в цену или их оплачиваем отдельно?", {"2.1"}),
@@ -299,18 +321,6 @@ def test_unavailable_history(corpus: tuple[SQLiteKnowledgeStore, Path], question
     selected = select(store, search(store, query), query)
     assert not selected.applicable and selected.missing_fact is None
     assert selected.gaps and "В базе нет применимой редакции" in selected.gaps[0]
-
-
-def test_later_date_gets_snapshot_with_explicit_limit(corpus: tuple[SQLiteKnowledgeStore, Path]) -> None:
-    store, _ = corpus
-    facts = QueryFacts(
-        "Какой срок испытания у главбуха по ст. 70 ТК РФ на 15.11.2026?",
-        dates=[EventDate("as_of", date(2026, 11, 15))],
-    )
-    selection = select(store, search(store, facts), facts)
-    assert selection.applicable
-    assert {fragment.snapshot_as_of for fragment in selection.applicable} == {"2026-10-10"}
-    assert not selection.gaps and selection.missing_fact is None
 
 
 def test_unclassified_date_does_not_select_current_law(

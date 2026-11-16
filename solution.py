@@ -72,30 +72,8 @@ def parse_dialogue(raw: str) -> list[Message]:
     return messages
 
 
-DECISIVE_WORDING = re.compile(
-    r"\b(не позднее|не ранее|не более|не менее|свыше|за исключением|"
-    r"только при|при условии|в случаях, не указанных)(?!\w)(?:[^.!?;\r\n]|\.(?=\d))+",
-    re.IGNORECASE,
-)
-
-
-def decisive_excerpt(quote: str, claim: str) -> str:
-    claim_lower = claim.casefold()
-    claim_numbers = set(re.findall(r"\d+", claim))
-    for match in DECISIVE_WORDING.finditer(quote):
-        excerpt = match[0].strip(" ,")
-        if len(excerpt) > 140 or excerpt.casefold() in claim_lower:
-            continue
-        # Skip incomplete references such as an excerpt ending at "п.".
-        if re.match(r"\.\s*\d", quote[match.end():]):
-            continue
-        if match[1].casefold() in claim_lower or claim_numbers.intersection(re.findall(r"\d+", excerpt)):
-            return excerpt
-    return ""
-
-
 def format_answer(answer: Answer) -> str:
-    """Render verified conclusions with inline references and selective quotations."""
+    """Keep each verified claim with its sources and take quotations from the catalogue."""
     note = answer.note.strip() if answer.claims else answer.text.strip()
     if answer.missing_fact and answer.missing_fact not in answer.text:
         note = "\n".join(filter(None, (note, f"Не хватает сведений: {answer.missing_fact}.")))
@@ -103,7 +81,7 @@ def format_answer(answer: Answer) -> str:
     blocks, quotes = [], []
     omitted = False
     for claim in answer.claims:
-        labels, excerpt = [], ""
+        labels, excerpts = [], []
         for fragment_id in claim.fragment_ids:
             source = by_id.get(fragment_id)
             if source is None:
@@ -113,13 +91,14 @@ def format_answer(answer: Answer) -> str:
                 label += f" ({source.revision_label})"
             if label not in labels:
                 labels.append(label)
-            if not excerpt:
-                excerpt = decisive_excerpt(source.quote, claim.text)
+            excerpt = source.quote.strip()
+            if excerpt and len(excerpt) <= 900 and excerpt not in excerpts:
+                excerpts.append(excerpt)
         if labels:
-            block = f"{claim.text.strip()} [{'; '.join(labels)}]"
+            block = f"{claim.text}\nОснования: {'; '.join(labels)}."
             if sum(len(part) + 2 for part in blocks) + len(block) + len(note) + 80 <= MAX_ANSWER_CHARS:
                 blocks.append(block)
-                quotes.append(excerpt)
+                quotes.append("\n".join(f"Цитата: «{excerpt}»" for excerpt in excerpts))
                 continue
         omitted = True
     if omitted and blocks:
@@ -127,14 +106,10 @@ def format_answer(answer: Answer) -> str:
     if answer.claims and not blocks:
         return FALLBACK
     spare = MAX_ANSWER_CHARS - len("\n\n".join(filter(None, (*blocks, note))))
-    used_quotes = set()
     for i, excerpt in enumerate(quotes):
-        if excerpt and excerpt not in used_quotes:
-            quoted = f" «{excerpt}»"
-            if len(quoted) <= spare:
-                blocks[i] += quoted
-                spare -= len(quoted)
-                used_quotes.add(excerpt)
+        if excerpt and len(excerpt) + 1 <= spare:
+            blocks[i] += "\n" + excerpt
+            spare -= len(excerpt) + 1
     text = "\n\n".join(filter(None, (*blocks, note)))
     return text if 0 < len(text) <= MAX_ANSWER_CHARS else FALLBACK
 

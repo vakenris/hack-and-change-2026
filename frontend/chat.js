@@ -264,7 +264,9 @@ async function openSource(fragmentId, trigger) {
   try {
     const card = await requestJson(`/api/sources/${encodeURIComponent(fragmentId)}`, { signal: controller.signal });
     if (sourceRequest !== controller) return;
-    if (!card || typeof card.quote !== "string" || !safeId.test(card.document_id || "")) {
+    if (!card || typeof card.quote !== "string" || !safeId.test(card.document_id || "")
+        || typeof card.source_url !== "string"
+        || !card.source_url.startsWith(`/api/documents/${encodeURIComponent(card.document_id)}?`)) {
       throw new Error("Сервер вернул неполную карточку. Откройте источник повторно.");
     }
     selectedSource = card;
@@ -329,10 +331,8 @@ async function toggleDocument() {
   documentRequest = controller;
   ui.openDocument.disabled = true;
   setFeedback(ui.documentFeedback, "Загружаю документ…");
-  const params = new URLSearchParams({ line_start: card.line_start, line_end: card.line_end });
   try {
-    const data = await requestJson(`/api/documents/${encodeURIComponent(card.document_id)}?${params}`,
-      { signal: controller.signal });
+    const data = await requestJson(card.source_url, { signal: controller.signal });
     if (documentRequest !== controller) return;
     renderDocument(data, card);
     setFeedback(ui.documentFeedback, "");

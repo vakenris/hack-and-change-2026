@@ -10,74 +10,14 @@ import time
 from calendar import monthrange
 from dataclasses import asdict
 from datetime import date
-from decimal import Decimal
 
 import httpx
 
 from . import llm_prompts
-from .contracts import REFUSAL_UNLAWFUL, Claim, Draft, EventDate, Fragment, Message, QueryFacts, TechnicalError
-from .knowledge_store import normalize
+from .contracts import Claim, Draft, EventDate, Fragment, Message, QueryFacts, TechnicalError
 from .runtime import remaining
 
 logger = logging.getLogger(__name__)
-APPROVAL_QUESTION = re.compile(r"\b(?:гендиректор\w*|генеральн\w+\s+директор\w*)\b")
-RUBLE_AMOUNT = re.compile(
-    r"(?<![\d.,-])(\d{1,3}(?: \d{3})+|\d+)([.,]\d+)?\s*"
-    r"(млн|миллион\w*|тыс\.?|тысяч\w*|руб\w*|₽)(?!\w)"
-)
-APPROVAL_RULE = re.compile(
-    r"^2\.4\. договоры на сумму свыше ([\d ]+) \([^()]+\) рублей "
-    r"подлежат одобрению генеральным директором до подписания\.$"
-)
-DAY_UNIT = re.compile(
-    r"\b(\d+)\s*(?:\([^()]+\)\s*)?(рабоч|календарн)\w*\s+д(?:ень|ня|ней)\b"
-)
-
-
-def has_day_unit_conflict(claim: Claim, fragments: dict[str, Fragment]) -> bool:
-    text = normalize(claim.text)
-    if re.search(r"\b(?:не\s+(?:\d+\s+)?(?:рабоч|календарн)\w*|вместо)\b", text):
-        return False
-    asserted = set(DAY_UNIT.findall(text))
-    if not asserted:
-        return False
-    evidence = {unit for key in claim.fragment_ids for unit in DAY_UNIT.findall(normalize(fragments[key].text))}
-    # Apply only to a single explicit duration, leaving complex cases to the verifier.
-    return len(asserted) == len(evidence) == 1 and any(
-        number == recorded and unit != source_unit
-        for number, unit in asserted for recorded, source_unit in evidence
-    )
-
-
-def approval_comparisons(question: str, fragments: list[Fragment]) -> list[dict[str, object]]:
-    """Compare a single explicit contract amount to a strict source threshold."""
-    text = normalize(question).replace("\u00a0", " ").replace("\u202f", " ")
-    if not APPROVAL_QUESTION.search(text) or not re.search(r"\bдоговор\w*\b", text):
-        return []
-    amounts = RUBLE_AMOUNT.findall(text)
-    if len(amounts) != 1:
-        return []
-    integer, fraction, unit = amounts[0]
-    if len(integer) + len(fraction) > 24:
-        return []
-    amount = Decimal(integer.replace(" ", "") + fraction.replace(",", "."))
-    if unit.startswith(("млн", "миллион")):
-        amount *= 1_000_000
-    elif unit.startswith("тыс"):
-        amount *= 1_000
-
-    comparisons = []
-    for fragment in fragments:
-        rule = APPROVAL_RULE.fullmatch(normalize(fragment.text).strip())
-        if rule and fragment.document_title.casefold().startswith("регламент согласования договоров"):
-            threshold = int(rule[1].replace(" ", ""))
-            comparisons.append({
-                "fragment_id": fragment.fragment_id,
-                "amount_rub": format(amount, "f"),
-                "threshold_rub": threshold,
-                "exceeds_strict_threshold": amount > threshold,
-            })
-    return comparisons
 
 
 def _env(*names: str) -> str:
@@ -195,9 +135,6 @@ def _strings(data: dict[str, object], field: str) -> list[str]:
 def extract_facts(messages: list[Message]) -> QueryFacts:
     question = messages[-1].content
     result = _request(llm_prompts.EXTRACT_FACTS, {"messages": [asdict(m) for m in messages]})
-    unlawful_request = result.get("unlawful_request", False)
-    if type(unlawful_request) is not bool:
-        raise TechnicalError("В ответе модели ожидается булево значение unlawful_request")
     dates: list[EventDate] = []
     for item in _array(result, "dates"):
         if not isinstance(item, dict):
@@ -225,7 +162,6 @@ def extract_facts(messages: list[Message]) -> QueryFacts:
         search_queries=_strings(result, "search_queries") or [question],
         document_refs=_strings(result, "document_refs"),
         dates=dates,
-        unlawful_request=unlawful_request,
     )
 
 
@@ -239,8 +175,6 @@ def _fragment_data(fragment: Fragment) -> dict[str, object]:
     }
     if fragment.periods:
         data["periods"] = fragment.periods
-    if fragment.snapshot_as_of:
-        data["snapshot_as_of"] = fragment.snapshot_as_of
     return data
 
 
@@ -255,14 +189,12 @@ def draft_answer(
                 "question": facts.question,
                 "search_queries": facts.search_queries,
                 "document_refs": facts.document_refs,
-                "unlawful_request": facts.unlawful_request,
                 "dates": [
                     {"event_type": event.event_type, "value": event.value.isoformat()}
                     for event in facts.dates
                 ],
             },
             "fragments": [_fragment_data(fragment) for fragment in fragments],
-            "approval_comparisons": approval_comparisons(facts.question, fragments),
         },
     )
     claims: list[Claim] = []
@@ -281,7 +213,7 @@ def draft_answer(
         raise invalid_claim
     reason = result.get("refusal_reason")
     if "refusal_reason" not in result or (
-        reason is not None and (not isinstance(reason, str) or reason not in {"out_of_scope", REFUSAL_UNLAWFUL})
+        reason is not None and (not isinstance(reason, str) or reason != "out_of_scope")
     ):
         raise TechnicalError("Модель вернула неизвестную причину отказа")
     summary = _string(result.get("summary"), "summary", allow_empty=True)
@@ -300,7 +232,6 @@ def verify_claims(
         llm_prompts.VERIFY_CLAIMS,
         {
             "user_context": [message.content for message in messages if message.role == "user"],
-            "approval_comparisons": approval_comparisons(messages[-1].content, list(fragments.values())),
             "claims": [
                 {
                     "index": index,
@@ -319,8 +250,7 @@ def verify_claims(
         supported.add(index)
     if len(supported) != len(indices):
         raise TechnicalError("Модель вернула повторяющийся индекс вывода")
-    return [claim for index, claim in enumerate(claims)
-            if index in supported and not has_day_unit_conflict(claim, fragments)]
+    return [claim for index, claim in enumerate(claims) if index in supported]
 
 
 def rerank_fragments(question: str, fragments: list[Fragment]) -> list[Fragment]:
